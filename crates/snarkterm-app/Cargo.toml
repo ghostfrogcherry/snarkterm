@@ -8,6 +8,12 @@ description = "SnarkTerm application entrypoint."
 
 [dependencies]
 anyhow.workspace = true
+crossterm.workspace = true
+portable-pty.workspace = true
 snarkterm-core = { path = "../snarkterm-core" }
 snarkterm-config = { path = "../snarkterm-config" }
 tracing.workspace = true
+
+[[bin]]
+name = "snarkterm"
+path = "src/main.rs"

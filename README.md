@@ -20,7 +20,54 @@ The core rule is simple: SnarkTerm must remain a correct, usable terminal even i
 
 ## Repository Status
 
-This repository currently contains the architecture, crate plan, plugin design, schema, man page, TLDR page, shell integration examples, and implementation roadmap for the project. Runtime implementation will be added incrementally according to the roadmap in `docs/ROADMAP.md`.
+SnarkTerm now has a usable first cut: a PTY-backed terminal binary named `snarkterm` that can launch your shell or run a command through your shell. The full GPU window, tabs, splits, side gutter, and renderer are still under active implementation.
+
+Current reality, because marketing is how software lies to itself:
+
+- Usable: PTY-backed shell launch in the current terminal.
+- Usable: `snarkterm -c <COMMAND>` command mode with commentary.
+- Usable: basic CLI help/version behavior.
+- Planned: native GPU window and terminal grid rendering.
+- Planned: real snark gutter instead of command-mode stderr commentary.
+- Planned: shell integration, rules, stats, Ollama, plugins, tabs, and splits.
+
+## Install And Run
+
+Build the binary:
+
+```sh
+cargo build --release -p snarkterm-app --bin snarkterm
+```
+
+Run it from the repo:
+
+```sh
+cargo run -p snarkterm-app --bin snarkterm
+```
+
+Run a single command with commentary:
+
+```sh
+cargo run -p snarkterm-app --bin snarkterm -- -c 'printf hello'
+```
+
+Install locally with Cargo:
+
+```sh
+cargo install --path crates/snarkterm-app
+```
+
+Then run:
+
+```sh
+snarkterm
+```
+
+If you want fewer comments from the rectangle with opinions:
+
+```sh
+snarkterm -c 'false' --no-commentary
+```
 
 ## Documentation
 
@@ -34,9 +81,19 @@ This repository currently contains the architecture, crate plan, plugin design, 
 - `tldr/snarkterm.md`: concise usage examples for users with builds still running.
 - `examples/shell/`: Bash, Zsh, and Fish OSC 777 shell integration examples.
 
-## Current Skeleton
+## Current Product State
 
-The Rust workspace is intentionally skeletal but compile-checked. It defines the crate boundaries and shared event types that future implementation work will build on. SnarkTerm is not yet a usable terminal emulator, which is a shame, but so was most software at some point and look how confidently it shipped.
+The Rust workspace defines the crate boundaries and shared event types that future implementation work will build on. The `snarkterm` binary is intentionally minimal, but it is no longer a decorative README. It opens a real PTY, spawns your shell, forwards bytes, and restores raw mode on exit.
+
+Known limitations:
+
+- No GPU window yet.
+- No scrollback owned by SnarkTerm yet.
+- No tabs/splits yet.
+- No side gutter yet.
+- Interactive mode depends on the host terminal emulator for display.
+- Resize handling is still basic.
+- Commentary in command mode prints to stderr until the real UI gutter exists.
 
 ## License
 
