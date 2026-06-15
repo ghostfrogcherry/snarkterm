@@ -262,6 +262,13 @@ impl GpuWindowState {
             Key::Named(NamedKey::Tab) => Some(b"\t"),
             Key::Named(NamedKey::Backspace) => Some(b"\x7f"),
             Key::Named(NamedKey::Escape) => Some(b"\x1b"),
+            Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A"),
+            Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B"),
+            Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C"),
+            Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D"),
+            Key::Named(NamedKey::Home) => Some(b"\x1b[H"),
+            Key::Named(NamedKey::End) => Some(b"\x1b[F"),
+            Key::Named(NamedKey::Delete) => Some(b"\x1b[3~"),
             _ => key.text.as_ref().map(|text| text.as_bytes()),
         };
 
@@ -352,6 +359,19 @@ impl GpuWindowState {
                 push_glyph(&mut vertices, ch, x, y, pixel, width, height);
             }
         }
+
+        let cursor_x = margin_x + terminal.cursor_col as f32 * cell_w;
+        let cursor_y = margin_y + terminal.cursor_row as f32 * cell_h + 14.0;
+        push_rect(
+            &mut vertices,
+            cursor_x,
+            cursor_y,
+            8.0,
+            2.0,
+            width,
+            height,
+            [1.0, 0.23, 0.42],
+        );
 
         vertices
     }
@@ -614,18 +634,20 @@ fn glyph_rows(ch: char) -> [u8; 7] {
 
 #[derive(Debug)]
 struct TerminalBuffer {
-    lines: Vec<String>,
+    cells: Vec<Vec<char>>,
+    cursor_row: usize,
     cursor_col: usize,
-    max_lines: usize,
+    rows: usize,
     cols: usize,
 }
 
 impl TerminalBuffer {
     fn new(cols: usize, rows: usize) -> Self {
         Self {
-            lines: vec![String::new()],
+            cells: vec![vec![' '; cols]; rows.max(1)],
+            cursor_row: 0,
             cursor_col: 0,
-            max_lines: rows.max(1),
+            rows: rows.max(1),
             cols,
         }
     }
@@ -650,23 +672,16 @@ impl TerminalBuffer {
         if self.cursor_col >= self.cols {
             self.newline();
         }
-        let line = self.lines.last_mut().expect("terminal always has a line");
-        while line.len() < self.cursor_col {
-            line.push(' ');
-        }
-        if self.cursor_col < line.len() {
-            line.replace_range(self.cursor_col..self.cursor_col + 1, &ch.to_string());
-        } else {
-            line.push(ch);
-        }
+        self.cells[self.cursor_row][self.cursor_col] = ch;
         self.cursor_col += 1;
     }
 
     fn newline(&mut self) {
-        self.lines.push(String::new());
         self.cursor_col = 0;
-        if self.lines.len() > self.max_lines {
-            self.lines.remove(0);
+        if self.cursor_row + 1 >= self.rows {
+            self.scroll_up();
+        } else {
+            self.cursor_row += 1;
         }
     }
 
@@ -675,40 +690,147 @@ impl TerminalBuffer {
             return;
         }
         self.cursor_col -= 1;
-        if let Some(line) = self.lines.last_mut() {
-            if self.cursor_col < line.len() {
-                line.remove(self.cursor_col);
-            }
+        self.cells[self.cursor_row][self.cursor_col] = ' ';
+    }
+
+    fn move_cursor(&mut self, row: usize, col: usize) {
+        self.cursor_row = row.min(self.rows.saturating_sub(1));
+        self.cursor_col = col.min(self.cols.saturating_sub(1));
+    }
+
+    fn move_relative(&mut self, row_delta: isize, col_delta: isize) {
+        let row = self.cursor_row.saturating_add_signed(row_delta);
+        let col = self.cursor_col.saturating_add_signed(col_delta);
+        self.move_cursor(row, col);
+    }
+
+    fn clear_screen(&mut self) {
+        for row in &mut self.cells {
+            row.fill(' ');
+        }
+        self.move_cursor(0, 0);
+    }
+
+    fn clear_line_from_cursor(&mut self) {
+        for col in self.cursor_col..self.cols {
+            self.cells[self.cursor_row][col] = ' ';
         }
     }
 
-    fn visible_lines(&self) -> &[String] {
-        &self.lines
+    fn scroll_up(&mut self) {
+        self.cells.remove(0);
+        self.cells.push(vec![' '; self.cols]);
+    }
+
+    fn visible_lines(&self) -> Vec<String> {
+        self.cells
+            .iter()
+            .map(|row| row.iter().collect::<String>().trim_end().to_string())
+            .collect()
     }
 }
 
 #[derive(Default)]
 struct OutputParser {
-    escape: bool,
+    state: ParserState,
+    csi: String,
 }
 
 impl OutputParser {
     fn feed(&mut self, bytes: &[u8], terminal: &mut TerminalBuffer) {
         for byte in bytes {
             let ch = *byte as char;
-            if self.escape {
-                if ch.is_ascii_alphabetic() || ch == '\u{7}' {
-                    self.escape = false;
+            match self.state {
+                ParserState::Ground => {
+                    if ch == '\x1b' {
+                        self.state = ParserState::Escape;
+                    } else {
+                        terminal.put_char(ch);
+                    }
                 }
-                continue;
+                ParserState::Escape => {
+                    if ch == '[' {
+                        self.csi.clear();
+                        self.state = ParserState::Csi;
+                    } else if ch == ']' {
+                        self.state = ParserState::Osc;
+                    } else if ch == 'c' {
+                        terminal.clear_screen();
+                        self.state = ParserState::Ground;
+                    } else {
+                        self.state = ParserState::Ground;
+                    }
+                }
+                ParserState::Csi => {
+                    if ch.is_ascii_alphabetic() || ch == '~' {
+                        self.apply_csi(ch, terminal);
+                        self.state = ParserState::Ground;
+                    } else if self.csi.len() < 32 {
+                        self.csi.push(ch);
+                    }
+                }
+                ParserState::Osc => {
+                    if ch == '\u{7}' {
+                        self.state = ParserState::Ground;
+                    } else if ch == '\x1b' {
+                        self.state = ParserState::OscEscape;
+                    }
+                }
+                ParserState::OscEscape => {
+                    self.state = ParserState::Ground;
+                }
             }
-            if ch == '\x1b' {
-                self.escape = true;
-                continue;
-            }
-            terminal.put_char(ch);
         }
     }
+
+    fn apply_csi(&self, command: char, terminal: &mut TerminalBuffer) {
+        let params = parse_csi_params(&self.csi);
+        let first = params.first().copied().unwrap_or(1).max(1) as usize;
+
+        match command {
+            'A' => terminal.move_relative(-(first as isize), 0),
+            'B' => terminal.move_relative(first as isize, 0),
+            'C' => terminal.move_relative(0, first as isize),
+            'D' => terminal.move_relative(0, -(first as isize)),
+            'G' => terminal.move_cursor(terminal.cursor_row, first.saturating_sub(1)),
+            'H' | 'f' => {
+                let row = params.first().copied().unwrap_or(1).max(1) as usize - 1;
+                let col = params.get(1).copied().unwrap_or(1).max(1) as usize - 1;
+                terminal.move_cursor(row, col);
+            }
+            'J' => {
+                if params.first().copied().unwrap_or(0) == 2 {
+                    terminal.clear_screen();
+                }
+            }
+            'K' => terminal.clear_line_from_cursor(),
+            'm' => {}
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+enum ParserState {
+    #[default]
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+fn parse_csi_params(raw: &str) -> Vec<i32> {
+    raw.trim_start_matches('?')
+        .split(';')
+        .filter_map(|part| {
+            if part.is_empty() {
+                Some(0)
+            } else {
+                part.parse().ok()
+            }
+        })
+        .collect()
 }
 
 fn run_interactive() -> Result<u8> {
@@ -910,5 +1032,36 @@ mod tests {
     #[test]
     fn glyph_rows_supports_letters() {
         assert_ne!(super::glyph_rows('S'), [0; 7]);
+    }
+
+    #[test]
+    fn parser_applies_cursor_positioning() {
+        let mut terminal = super::TerminalBuffer::new(10, 3);
+        let mut parser = super::OutputParser::default();
+
+        parser.feed(b"abc\x1b[2;3HZ", &mut terminal);
+
+        assert_eq!(terminal.visible_lines()[0], "abc");
+        assert_eq!(terminal.visible_lines()[1], "  Z");
+    }
+
+    #[test]
+    fn parser_clears_screen() {
+        let mut terminal = super::TerminalBuffer::new(10, 3);
+        let mut parser = super::OutputParser::default();
+
+        parser.feed(b"abc\x1b[2JZ", &mut terminal);
+
+        assert_eq!(terminal.visible_lines()[0], "Z");
+    }
+
+    #[test]
+    fn parser_skips_osc_sequences() {
+        let mut terminal = super::TerminalBuffer::new(20, 3);
+        let mut parser = super::OutputParser::default();
+
+        parser.feed(b"a\x1b]0;title\x07b", &mut terminal);
+
+        assert_eq!(terminal.visible_lines()[0], "ab");
     }
 }
