@@ -1,3 +1,4 @@
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -18,11 +19,15 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const GRID_MARGIN_X: f32 = 16.0;
-const GRID_MARGIN_Y: f32 = 18.0;
-const CELL_W: f32 = 10.0;
-const CELL_H: f32 = 16.0;
-const GLYPH_PIXEL: f32 = 2.0;
+const GRID_MARGIN_X: f32 = 12.0;
+const GRID_MARGIN_Y: f32 = 12.0;
+const FONT_SIZE: f32 = 14.0;
+
+const ATLAS_COLS: u32 = 16;
+const ATLAS_CELL: u32 = 16;
+const ATLAS_SIZE: u32 = ATLAS_COLS * ATLAS_CELL;
+
+const EMBEDDED_FONT: &[u8] = include_bytes!("../../../assets/AdwaitaMono-Regular.ttf");
 
 #[derive(Debug, Default)]
 struct Args {
@@ -167,6 +172,127 @@ impl ApplicationHandler for WindowApp {
     }
 }
 
+struct GlyphInfo {
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    width: f32,
+    height: f32,
+    x_offset: f32,
+    y_offset: f32,
+    #[allow(dead_code)]
+    x_advance: f32,
+}
+
+struct GlyphCache {
+    glyphs: Vec<GlyphInfo>,
+    #[allow(dead_code)]
+    atlas_width: f32,
+    #[allow(dead_code)]
+    atlas_height: f32,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+}
+
+impl GlyphCache {
+    fn new() -> Self {
+        let font = FontRef::try_from_slice(EMBEDDED_FONT).expect("failed to load embedded font");
+        let scale = PxScale::from(FONT_SIZE);
+        let scaled = font.as_scaled(scale);
+
+        let ascent = scaled.ascent();
+        let descent = scaled.descent();
+        let line_gap = scaled.line_gap();
+        let cell_h = ascent - descent + line_gap;
+        let cell_w = scaled.h_advance(font.glyph_id('M'));
+
+        let mut atlas_data = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE) as usize];
+
+        let mut glyphs = Vec::with_capacity(96);
+
+        for i in 0u8..96 {
+            let ch = (i + 32) as char;
+            let glyph_id = font.glyph_id(ch);
+            let glyph = glyph_id.with_scale_and_position(PxScale::from(FONT_SIZE), ab_glyph::point(0.0, 0.0));
+
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                let glyph_w = bounds.width().max(1.0) as u32;
+                let glyph_h = bounds.height().max(1.0) as u32;
+
+                let atlas_col = i as u32 % ATLAS_COLS;
+                let atlas_row = i as u32 / ATLAS_COLS;
+                let atlas_x = atlas_col * ATLAS_CELL;
+                let atlas_y = atlas_row * ATLAS_CELL;
+
+                outlined.draw(|x, y, coverage| {
+                    let px = (atlas_x + x as u32).min(ATLAS_SIZE - 1);
+                    let py = (atlas_y + y as u32).min(ATLAS_SIZE - 1);
+                    let idx = (py * ATLAS_SIZE + px) as usize;
+                    if idx < atlas_data.len() {
+                        let existing = atlas_data[idx];
+                        let new_val = (coverage * 255.0) as u8;
+                        atlas_data[idx] = existing.max(new_val);
+                    }
+                });
+
+                let u0 = atlas_x as f32 / ATLAS_SIZE as f32;
+                let v0 = atlas_y as f32 / ATLAS_SIZE as f32;
+                let u1 = (atlas_x + glyph_w) as f32 / ATLAS_SIZE as f32;
+                let v1 = (atlas_y + glyph_h) as f32 / ATLAS_SIZE as f32;
+
+                glyphs.push(GlyphInfo {
+                    u0,
+                    v0,
+                    u1,
+                    v1,
+                    width: glyph_w as f32,
+                    height: glyph_h as f32,
+                    x_offset: bounds.min.x as f32,
+                    y_offset: bounds.min.y as f32,
+                    x_advance: scaled.h_advance(glyph_id),
+                });
+            } else {
+                let atlas_col = i as u32 % ATLAS_COLS;
+                let atlas_row = i as u32 / ATLAS_COLS;
+                let atlas_x = atlas_col * ATLAS_CELL;
+                let atlas_y = atlas_row * ATLAS_CELL;
+
+                let u0 = atlas_x as f32 / ATLAS_SIZE as f32;
+                let v0 = atlas_y as f32 / ATLAS_SIZE as f32;
+
+                glyphs.push(GlyphInfo {
+                    u0,
+                    v0,
+                    u1: u0,
+                    v1: v0,
+                    width: 0.0,
+                    height: 0.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    x_advance: scaled.h_advance(glyph_id),
+                });
+            }
+        }
+
+        Self {
+            glyphs,
+            atlas_width: ATLAS_SIZE as f32,
+            atlas_height: ATLAS_SIZE as f32,
+            cell_w,
+            cell_h,
+            ascent,
+        }
+    }
+
+    fn glyph(&self, ch: char) -> &GlyphInfo {
+        let idx = (ch as u32).saturating_sub(32).min(95) as usize;
+        &self.glyphs[idx]
+    }
+}
+
 struct GpuWindowState {
     window: &'static Window,
     surface: Surface<'static>,
@@ -174,10 +300,12 @@ struct GpuWindowState {
     queue: Queue,
     config: SurfaceConfiguration,
     pipeline: RenderPipeline,
+    bind_group: wgpu::BindGroup,
     terminal: Arc<Mutex<TerminalBuffer>>,
     pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pty_master: Option<Box<dyn portable_pty::MasterPty>>,
     modifiers: ModifiersState,
+    glyph_cache: GlyphCache,
 }
 
 impl GpuWindowState {
@@ -185,7 +313,9 @@ impl GpuWindowState {
         let window = Box::leak(Box::new(window));
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(&*window).context("failed to create GPU surface")?;
+        let surface = instance
+            .create_surface(&*window)
+            .context("failed to create GPU surface")?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -235,8 +365,124 @@ impl GpuWindowState {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let pipeline = create_text_pipeline(&device, config.format);
-        let (cols, rows) = grid_size(config.width, config.height);
+
+        let glyph_cache = GlyphCache::new();
+
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("snarkterm-glyph-atlas"),
+            size: wgpu::Extent3d {
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let mut atlas_data = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE) as usize];
+        let font =
+            FontRef::try_from_slice(EMBEDDED_FONT).expect("failed to load embedded font for atlas");
+        let scale = PxScale::from(FONT_SIZE);
+        let scaled = font.as_scaled(scale);
+
+        for i in 0u8..96u8 {
+            let ch = (i + 32) as char;
+            let glyph_id = font.glyph_id(ch);
+            let glyph = glyph_id.with_scale_and_position(PxScale::from(FONT_SIZE), ab_glyph::point(0.0, 0.0));
+
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let _bounds = outlined.px_bounds();
+                let atlas_col = i as u32 % ATLAS_COLS;
+                let atlas_row = i as u32 / ATLAS_COLS;
+                let atlas_x = atlas_col * ATLAS_CELL;
+                let atlas_y = atlas_row * ATLAS_CELL;
+
+                let _ = scaled;
+                outlined.draw(|x, y, coverage| {
+                    let px = (atlas_x + x as u32).min(ATLAS_SIZE - 1);
+                    let py = (atlas_y + y as u32).min(ATLAS_SIZE - 1);
+                    let idx = (py * ATLAS_SIZE + px) as usize;
+                    if idx < atlas_data.len() {
+                        let existing = atlas_data[idx];
+                        let new_val = (coverage * 255.0) as u8;
+                        atlas_data[idx] = existing.max(new_val);
+                    }
+                });
+            }
+        }
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &atlas_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &atlas_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(ATLAS_SIZE),
+                rows_per_image: Some(ATLAS_SIZE),
+            },
+            wgpu::Extent3d {
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("snarkterm-glyph-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("snarkterm-glyph-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("snarkterm-glyph-bind-group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let pipeline = create_render_pipeline(&device, config.format, &bind_group_layout);
+        let (cols, rows) = grid_size(config.width, config.height, &glyph_cache);
         let terminal = Arc::new(Mutex::new(TerminalBuffer::new(cols, rows)));
         let (pty_writer, pty_master) = spawn_window_shell(Arc::clone(&terminal))?;
 
@@ -247,10 +493,12 @@ impl GpuWindowState {
             queue,
             config,
             pipeline,
+            bind_group,
             terminal,
             pty_writer,
             pty_master: Some(pty_master),
             modifiers: ModifiersState::empty(),
+            glyph_cache,
         })
     }
 
@@ -262,7 +510,7 @@ impl GpuWindowState {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        let (cols, rows) = grid_size(width, height);
+        let (cols, rows) = grid_size(width, height, &self.glyph_cache);
         if let Ok(mut terminal) = self.terminal.lock() {
             terminal.resize(cols, rows);
         }
@@ -377,7 +625,7 @@ impl GpuWindowState {
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("snarkterm-background-pass"),
+                label: Some("snarkterm-render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -397,6 +645,7 @@ impl GpuWindowState {
             });
             if !vertices.is_empty() {
                 pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.draw(0..vertices.len() as u32, 0..1);
             }
@@ -413,90 +662,128 @@ impl GpuWindowState {
         };
 
         let mut vertices = Vec::new();
-        let width = self.config.width as f32;
-        let height = self.config.height as f32;
+        let screen_w = self.config.width as f32;
+        let screen_h = self.config.height as f32;
+        let gc = &self.glyph_cache;
+
+        let white_u = (ATLAS_COLS * ATLAS_CELL - 1) as f32 / ATLAS_SIZE as f32;
+        let white_v = (ATLAS_COLS * ATLAS_CELL - 1) as f32 / ATLAS_SIZE as f32;
 
         for (row, line) in terminal.display_cells().iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
-                let x = GRID_MARGIN_X + col as f32 * CELL_W;
-                let y = GRID_MARGIN_Y + row as f32 * CELL_H;
+                let x = GRID_MARGIN_X + col as f32 * gc.cell_w;
+                let y = GRID_MARGIN_Y + row as f32 * gc.cell_h;
+
                 if let Some(bg) = cell.bg {
-                    push_rect(
+                    push_quad(
                         &mut vertices,
                         x,
                         y,
-                        CELL_W,
-                        CELL_H,
-                        width,
-                        height,
+                        gc.cell_w,
+                        gc.cell_h,
+                        screen_w,
+                        screen_h,
                         bg.as_array(),
+                        white_u,
+                        white_v,
+                        white_u,
+                        white_v,
                     );
                 }
-                if cell.ch != ' ' {
-                    push_glyph(
-                        &mut vertices,
-                        cell.ch,
-                        x,
-                        y,
-                        GLYPH_PIXEL,
-                        width,
-                        height,
-                        cell.fg.as_array(),
-                    );
+
+                if cell.ch != ' ' && cell.ch != '\0' {
+                    let g = gc.glyph(cell.ch);
+                    if g.width > 0.0 {
+                        let gx = x + g.x_offset;
+                        let gy = y + gc.ascent + g.y_offset;
+                        push_quad(
+                            &mut vertices,
+                            gx,
+                            gy,
+                            g.width,
+                            g.height,
+                            screen_w,
+                            screen_h,
+                            cell.fg.as_array(),
+                            g.u0,
+                            g.v0,
+                            g.u1,
+                            g.v1,
+                        );
+                    }
                 }
+
                 if cell.underline {
-                    push_rect(
+                    push_quad(
                         &mut vertices,
                         x,
-                        y + 14.0,
-                        8.0,
+                        y + gc.cell_h - 2.0,
+                        gc.cell_w,
                         1.0,
-                        width,
-                        height,
+                        screen_w,
+                        screen_h,
                         cell.fg.as_array(),
+                        white_u,
+                        white_v,
+                        white_u,
+                        white_v,
                     );
                 }
+
                 if cell.strikethrough {
-                    push_rect(
+                    push_quad(
                         &mut vertices,
                         x,
-                        y + 7.0,
-                        8.0,
+                        y + gc.cell_h * 0.5,
+                        gc.cell_w,
                         1.0,
-                        width,
-                        height,
+                        screen_w,
+                        screen_h,
                         cell.fg.as_array(),
+                        white_u,
+                        white_v,
+                        white_u,
+                        white_v,
                     );
                 }
             }
         }
 
-        let cursor_x = GRID_MARGIN_X + terminal.cursor_col as f32 * CELL_W;
-        let cursor_y = GRID_MARGIN_Y + terminal.cursor_row as f32 * CELL_H + 14.0;
-        push_rect(
+        let cursor_x = GRID_MARGIN_X + terminal.cursor_col as f32 * gc.cell_w;
+        let cursor_y = GRID_MARGIN_Y + terminal.cursor_row as f32 * gc.cell_h + gc.cell_h - 2.0;
+        push_quad(
             &mut vertices,
             cursor_x,
             cursor_y,
-            8.0,
+            gc.cell_w,
             2.0,
-            width,
-            height,
+            screen_w,
+            screen_h,
             [1.0, 0.23, 0.42],
+            white_u,
+            white_v,
+            white_u,
+            white_v,
         );
 
         vertices
     }
 }
 
-fn grid_size(width: u32, height: u32) -> (usize, usize) {
-    let cols = ((width as f32 - GRID_MARGIN_X * 2.0) / CELL_W).floor().max(1.0) as usize;
-    let rows = ((height as f32 - GRID_MARGIN_Y * 2.0) / CELL_H).floor().max(1.0) as usize;
+fn grid_size(width: u32, height: u32, gc: &GlyphCache) -> (usize, usize) {
+    let cols =
+        ((width as f32 - GRID_MARGIN_X * 2.0) / gc.cell_w).floor().max(1.0) as usize;
+    let rows =
+        ((height as f32 - GRID_MARGIN_Y * 2.0) / gc.cell_h).floor().max(1.0) as usize;
     (cols, rows)
 }
 
 fn spawn_window_shell(
     terminal: Arc<Mutex<TerminalBuffer>>,
-) -> Result<(Arc<Mutex<Box<dyn Write + Send>>>, Box<dyn portable_pty::MasterPty>)> {
+) -> Result<(
+    Arc<Mutex<Box<dyn Write + Send>>>,
+    Box<dyn portable_pty::MasterPty>,
+)> {
     let shell = user_shell();
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -547,40 +834,54 @@ fn spawn_window_shell(
     Ok((writer, pair.master))
 }
 
-fn create_text_pipeline(device: &Device, format: wgpu::TextureFormat) -> RenderPipeline {
+fn create_render_pipeline(
+    device: &Device,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("snarkterm-bitmap-text-shader"),
+        label: Some("snarkterm-render-shader"),
         source: wgpu::ShaderSource::Wgsl(
             r#"
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
+    @location(1) uv: vec2<f32>,
 };
 
+@group(0) @binding(0) var glyph_texture: texture_2d<f32>;
+@group(0) @binding(1) var tex_sampler: sampler;
+
 @vertex
-fn vs_main(@location(0) position: vec2<f32>, @location(1) color: vec3<f32>) -> VertexOut {
+fn vs_main(
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+) -> VertexOut {
     var out: VertexOut;
     out.position = vec4<f32>(position, 0.0, 1.0);
     out.color = color;
+    out.uv = uv;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    let a = textureSample(glyph_texture, tex_sampler, in.uv).r;
+    return vec4<f32>(in.color, a);
 }
 "#
             .into(),
         ),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("snarkterm-text-pipeline-layout"),
-        bind_group_layouts: &[],
+        label: Some("snarkterm-pipeline-layout"),
+        bind_group_layouts: &[bind_group_layout],
         push_constant_ranges: &[],
     });
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("snarkterm-text-pipeline"),
+        label: Some("snarkterm-render-pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -593,7 +894,18 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -610,6 +922,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 struct Vertex {
     position: [f32; 2],
     color: [f32; 3],
+    uv: [f32; 2],
 }
 
 impl Vertex {
@@ -624,44 +937,21 @@ impl Vertex {
                     format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    offset: 8,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 20,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
                 },
             ],
         }
     }
 }
 
-fn push_glyph(
-    vertices: &mut Vec<Vertex>,
-    ch: char,
-    x: f32,
-    y: f32,
-    pixel: f32,
-    width: f32,
-    height: f32,
-    color: [f32; 3],
-) {
-    for (row, bits) in glyph_rows(ch).iter().enumerate() {
-        for col in 0..5 {
-            if bits & (1 << (4 - col)) != 0 {
-                push_rect(
-                    vertices,
-                    x + col as f32 * pixel,
-                    y + row as f32 * pixel,
-                    pixel,
-                    pixel,
-                    width,
-                    height,
-                    color,
-                );
-            }
-        }
-    }
-}
-
-fn push_rect(
+fn push_quad(
     vertices: &mut Vec<Vertex>,
     x: f32,
     y: f32,
@@ -670,93 +960,23 @@ fn push_rect(
     screen_w: f32,
     screen_h: f32,
     color: [f32; 3],
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
 ) {
     let x1 = x / screen_w * 2.0 - 1.0;
     let y1 = 1.0 - y / screen_h * 2.0;
     let x2 = (x + w) / screen_w * 2.0 - 1.0;
     let y2 = 1.0 - (y + h) / screen_h * 2.0;
     vertices.extend_from_slice(&[
-        Vertex { position: [x1, y1], color },
-        Vertex { position: [x2, y1], color },
-        Vertex { position: [x2, y2], color },
-        Vertex { position: [x1, y1], color },
-        Vertex { position: [x2, y2], color },
-        Vertex { position: [x1, y2], color },
+        Vertex { position: [x1, y1], color, uv: [u0, v0] },
+        Vertex { position: [x2, y1], color, uv: [u1, v0] },
+        Vertex { position: [x2, y2], color, uv: [u1, v1] },
+        Vertex { position: [x1, y1], color, uv: [u0, v0] },
+        Vertex { position: [x2, y2], color, uv: [u1, v1] },
+        Vertex { position: [x1, y2], color, uv: [u0, v1] },
     ]);
-}
-
-fn glyph_rows(ch: char) -> [u8; 7] {
-    match ch.to_ascii_uppercase() {
-        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-        'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
-        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
-        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
-        'J' => [0b00001, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110],
-        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
-        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
-        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
-        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
-        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
-        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
-        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
-        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
-        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
-        '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
-        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-        '5' => [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110],
-        '6' => [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
-        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
-        '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100],
-        ',' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100, 0b01000],
-        ':' => [0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000],
-        ';' => [0b00000, 0b01100, 0b01100, 0b00000, 0b00100, 0b00100, 0b01000],
-        '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
-        '_' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111],
-        '/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
-        '\\' => [0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001],
-        '|' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        '>' => [0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000],
-        '<' => [0b00001, 0b00010, 0b00100, 0b01000, 0b00100, 0b00010, 0b00001],
-        '=' => [0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
-        '+' => [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000],
-        '*' => [0b00000, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00000],
-        '$' => [0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100],
-        '#' => [0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010],
-        '!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100],
-        '?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100],
-        '(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
-        ')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
-        '[' => [0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110],
-        ']' => [0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110],
-        '{' => [0b00010, 0b00100, 0b00100, 0b01000, 0b00100, 0b00100, 0b00010],
-        '}' => [0b01000, 0b00100, 0b00100, 0b00010, 0b00100, 0b00100, 0b01000],
-        '~' => [0b00000, 0b00000, 0b01000, 0b10101, 0b00010, 0b00000, 0b00000],
-        '@' => [0b01110, 0b10001, 0b10111, 0b10101, 0b10111, 0b10000, 0b01110],
-        '&' => [0b01100, 0b10010, 0b10100, 0b01000, 0b10101, 0b10010, 0b01101],
-        '%' => [0b11000, 0b11001, 0b00010, 0b00100, 0b01000, 0b10011, 0b00011],
-        '^' => [0b00100, 0b01010, 0b10001, 0b00000, 0b00000, 0b00000, 0b00000],
-        '"' => [0b01010, 0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000],
-        '\'' => [0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000],
-        '`' => [0b01000, 0b00100, 0b00010, 0b00000, 0b00000, 0b00000, 0b00000],
-        _ => [0b11111, 0b10001, 0b00101, 0b01001, 0b10100, 0b10001, 0b11111],
-    }
 }
 
 fn run_interactive() -> Result<u8> {
@@ -889,10 +1109,10 @@ Options:\n\
   -V, --version           Show version\n\
 \n\
 Current status:\n\
-  This is the first usable PTY-backed cut. It launches a real shell and passes\n\
-  bytes like a terminal. The --window path opens the first native GPU surface.\n\
-  Tabs, splits, text rendering, and the side gutter are still upcoming, because\n\
-  apparently serious software requires implementation."
+  GPU-rendered terminal with proper font loading, PTY integration, scrollback,\n\
+  color support, and Ctrl key bindings. Tabs, splits, and the snark gutter\n\
+  are still in progress, because building a real terminal takes more than\n\
+  one weekend and a sarcastic personality."
     );
 }
 
@@ -913,7 +1133,7 @@ impl Drop for RawModeGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_commentary, parse_args};
+    use super::{command_commentary, parse_args, GlyphCache};
 
     #[test]
     fn parses_command_flag() {
@@ -944,18 +1164,36 @@ mod tests {
     }
 
     #[test]
-    fn glyph_rows_supports_letters() {
-        assert_ne!(super::glyph_rows('S'), [0; 7]);
-    }
-
-    #[test]
-    fn grid_size_uses_window_dimensions() {
-        assert_eq!(super::grid_size(1100, 720), (106, 42));
-    }
-
-    #[test]
     fn ctrl_c_is_x03() {
         let bytes = b"\x03";
         assert_eq!(bytes[0], 0x03);
+    }
+
+    #[test]
+    fn glyph_cache_loads_all_printable_ascii() {
+        let gc = GlyphCache::new();
+        assert_eq!(gc.glyphs.len(), 96);
+        assert!(gc.cell_w > 0.0);
+        assert!(gc.cell_h > 0.0);
+    }
+
+    #[test]
+    fn glyph_cache_returns_valid_info_for_common_chars() {
+        let gc = GlyphCache::new();
+        let g = gc.glyph('A');
+        assert!(g.width > 0.0);
+        assert!(g.height > 0.0);
+        assert!(g.x_advance > 0.0);
+
+        let g = gc.glyph(' ');
+        assert!(g.x_advance > 0.0);
+    }
+
+    #[test]
+    fn grid_size_uses_font_metrics() {
+        let gc = GlyphCache::new();
+        let (cols, rows) = super::grid_size(1100, 720, &gc);
+        assert!(cols > 40);
+        assert!(rows > 15);
     }
 }

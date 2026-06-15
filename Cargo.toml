@@ -23,6 +23,7 @@ repository = "https://github.com/OWNER/snarkterm"
 description = "A serious GPU terminal emulator with unserious judgment."
 
 [workspace.dependencies]
+ab_glyph = "0.2"
 anyhow = "1"
 bytemuck = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
