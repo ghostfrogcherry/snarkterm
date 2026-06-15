@@ -30,6 +30,10 @@ pub struct Cell {
     pub ch: char,
     pub fg: RgbColor,
     pub bg: Option<RgbColor>,
+    pub underline: bool,
+    pub italic: bool,
+    pub reverse: bool,
+    pub strikethrough: bool,
 }
 
 impl Default for Cell {
@@ -38,6 +42,10 @@ impl Default for Cell {
             ch: ' ',
             fg: RgbColor::DEFAULT_FG,
             bg: None,
+            underline: false,
+            italic: false,
+            reverse: false,
+            strikethrough: false,
         }
     }
 }
@@ -47,6 +55,10 @@ struct GraphicsState {
     fg: RgbColor,
     bg: Option<RgbColor>,
     intensity: Intensity,
+    underline: bool,
+    italic: bool,
+    reverse: bool,
+    strikethrough: bool,
 }
 
 impl Default for GraphicsState {
@@ -55,17 +67,43 @@ impl Default for GraphicsState {
             fg: RgbColor::DEFAULT_FG,
             bg: None,
             intensity: Intensity::Normal,
+            underline: false,
+            italic: false,
+            reverse: false,
+            strikethrough: false,
         }
     }
 }
 
 impl GraphicsState {
     fn effective_fg(self) -> RgbColor {
-        match self.intensity {
+        let base = match self.intensity {
             Intensity::Normal => self.fg,
             Intensity::Bold => self.fg.scale(1.25),
             Intensity::Dim => self.fg.scale(0.55),
+        };
+        if self.reverse {
+            self.unwrap_bg().scale(base.r * 0.3 + base.g * 0.6 + base.b * 0.1)
+        } else {
+            base
         }
+    }
+
+    fn effective_bg(self) -> Option<RgbColor> {
+        let base = self.bg;
+        if self.reverse {
+            Some(self.fg)
+        } else {
+            base
+        }
+    }
+
+    fn unwrap_bg(self) -> RgbColor {
+        self.bg.unwrap_or(RgbColor {
+            r: 0.031,
+            g: 0.039,
+            b: 0.059,
+        })
     }
 }
 
@@ -79,11 +117,14 @@ enum Intensity {
 #[derive(Debug)]
 pub struct TerminalBuffer {
     cells: Vec<Vec<Cell>>,
+    scrollback: Vec<Vec<Cell>>,
     pub cursor_row: usize,
     pub cursor_col: usize,
+    pub scroll_offset: usize,
     rows: usize,
     cols: usize,
     graphics: GraphicsState,
+    pub mode_flags: u32,
 }
 
 impl TerminalBuffer {
@@ -92,11 +133,14 @@ impl TerminalBuffer {
         let cols = cols.max(1);
         Self {
             cells: vec![vec![Cell::default(); cols]; rows],
+            scrollback: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
+            scroll_offset: 0,
             rows,
             cols,
             graphics: GraphicsState::default(),
+            mode_flags: 0,
         }
     }
 
@@ -123,7 +167,11 @@ impl TerminalBuffer {
         self.cells[self.cursor_row][self.cursor_col] = Cell {
             ch,
             fg: self.graphics.effective_fg(),
-            bg: self.graphics.bg,
+            bg: self.graphics.effective_bg(),
+            underline: self.graphics.underline,
+            italic: self.graphics.italic,
+            reverse: self.graphics.reverse,
+            strikethrough: self.graphics.strikethrough,
         };
         self.cursor_col += 1;
     }
@@ -203,9 +251,61 @@ impl TerminalBuffer {
         self.move_cursor(self.cursor_row, self.cursor_col);
     }
 
-    fn scroll_up(&mut self) {
-        self.cells.remove(0);
+    pub fn scroll_up(&mut self) {
+        let row = self.cells.remove(0);
+        self.scrollback.push(row);
+        if self.scrollback.len() > 10000 {
+            self.scrollback.remove(0);
+        }
         self.cells.push(vec![Cell::default(); self.cols]);
+    }
+
+    pub fn scroll_page_up(&mut self) -> usize {
+        let page_size = self.rows;
+        let max_offset = self.scrollback.len().saturating_sub(page_size);
+        if self.scroll_offset < max_offset {
+            self.scroll_offset = (self.scroll_offset + page_size).min(max_offset);
+        }
+        self.scroll_offset
+    }
+
+    pub fn scroll_page_down(&mut self) -> usize {
+        let page_size = self.rows;
+        if self.scroll_offset > page_size {
+            self.scroll_offset -= page_size;
+        } else {
+            self.scroll_offset = 0;
+        }
+        self.scroll_offset
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    pub fn display_cells(&self) -> Vec<Vec<Cell>> {
+        if self.scroll_offset == 0 {
+            return self.cells.clone();
+        }
+        let mut result = Vec::new();
+        let start = self.scrollback.len().saturating_sub(self.scroll_offset);
+        let end = (start + self.rows).min(self.scrollback.len());
+        for row in &self.scrollback[start..end] {
+            result.push(row.clone());
+        }
+        let remaining = self.rows.saturating_sub(result.len());
+        for _ in 0..remaining {
+            result.push(vec![Cell::default(); self.cols]);
+        }
+        result
+    }
+
+    pub fn set_mode(&mut self, mode: u32, enabled: bool) {
+        if enabled {
+            self.mode_flags |= mode;
+        } else {
+            self.mode_flags &= !mode;
+        }
     }
 
     fn reset_graphics(&mut self) {
@@ -371,19 +471,47 @@ impl OutputParser {
             'B' => terminal.move_relative(first as isize, 0),
             'C' => terminal.move_relative(0, first as isize),
             'D' => terminal.move_relative(0, -(first as isize)),
+            'E' => {
+                terminal.move_cursor(terminal.cursor_row, 0);
+                terminal.move_relative(first as isize, 0);
+            }
+            'F' => {
+                terminal.move_cursor(terminal.cursor_row, 0);
+                terminal.move_relative(-(first as isize), 0);
+            }
             'G' => terminal.move_cursor(terminal.cursor_row, first.saturating_sub(1)),
             'H' | 'f' => {
                 let row = params.first().copied().unwrap_or(1).max(1) as usize - 1;
                 let col = params.get(1).copied().unwrap_or(1).max(1) as usize - 1;
                 terminal.move_cursor(row, col);
             }
-            'J' => {
-                if params.first().copied().unwrap_or(0) == 2 {
-                    terminal.clear_screen();
+            'J' => match params.first().copied().unwrap_or(0) {
+                0 => terminal.clear_line_from_cursor(),
+                2 => terminal.clear_screen(),
+                _ => {}
+            },
+            'K' => terminal.clear_line_from_cursor(),
+            'S' => {
+                for _ in 0..first {
+                    terminal.scroll_up();
                 }
             }
-            'K' => terminal.clear_line_from_cursor(),
+            'T' => {
+                for _ in 0..first {
+                    let row = terminal.cells.remove(terminal.cells.len() - 1);
+                    terminal.cells.insert(0, row);
+                }
+            }
             'm' => apply_sgr(&params, terminal),
+            'h' | 'l' => {
+                if self.csi.starts_with('?') {
+                    let mode_str = &self.csi[1..];
+                    if let Ok(mode) = mode_str.parse::<u32>() {
+                        let enabled = command == 'h';
+                        terminal.set_mode(mode, enabled);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -411,7 +539,15 @@ fn apply_sgr(params: &[i32], terminal: &mut TerminalBuffer) {
             0 => terminal.reset_graphics(),
             1 => terminal.graphics.intensity = Intensity::Bold,
             2 => terminal.graphics.intensity = Intensity::Dim,
+            3 => terminal.graphics.italic = true,
+            4 => terminal.graphics.underline = true,
+            7 => terminal.graphics.reverse = true,
+            9 => terminal.graphics.strikethrough = true,
             22 => terminal.graphics.intensity = Intensity::Normal,
+            23 => terminal.graphics.italic = false,
+            24 => terminal.graphics.underline = false,
+            27 => terminal.graphics.reverse = false,
+            29 => terminal.graphics.strikethrough = false,
             30..=37 | 90..=97 => terminal.set_ansi_fg(param),
             39 => terminal.graphics.fg = RgbColor::DEFAULT_FG,
             40..=47 | 100..=107 => terminal.set_ansi_bg(param),
@@ -603,5 +739,97 @@ mod tests {
 
         assert_eq!(terminal.visible_lines()[0], "ab");
         assert_eq!(terminal.visible_lines()[1], "cd");
+    }
+
+    #[test]
+    fn parser_applies_underline() {
+        let mut terminal = TerminalBuffer::new(20, 3);
+        let mut parser = OutputParser::default();
+
+        parser.feed(b"\x1b[4mU\x1b[24mN", &mut terminal);
+
+        assert!(terminal.cells()[0][0].underline);
+        assert!(!terminal.cells()[0][1].underline);
+    }
+
+    #[test]
+    fn parser_applies_italic() {
+        let mut terminal = TerminalBuffer::new(20, 3);
+        let mut parser = OutputParser::default();
+
+        parser.feed(b"\x1b[3mI\x1b[23mN", &mut terminal);
+
+        assert!(terminal.cells()[0][0].italic);
+        assert!(!terminal.cells()[0][1].italic);
+    }
+
+    #[test]
+    fn parser_applies_reverse_video() {
+        let mut terminal = TerminalBuffer::new(20, 3);
+        let mut parser = OutputParser::default();
+
+        parser.feed(b"\x1b[7mR\x1b[27mN", &mut terminal);
+
+        assert!(terminal.cells()[0][0].reverse);
+        assert!(!terminal.cells()[0][1].reverse);
+    }
+
+    #[test]
+    fn parser_applies_strikethrough() {
+        let mut terminal = TerminalBuffer::new(20, 3);
+        let mut parser = OutputParser::default();
+
+        parser.feed(b"\x1b[9mS\x1b[29mN", &mut terminal);
+
+        assert!(terminal.cells()[0][0].strikethrough);
+        assert!(!terminal.cells()[0][1].strikethrough);
+    }
+
+    #[test]
+    fn scrollback_stores_scrolled_lines() {
+        let mut terminal = TerminalBuffer::new(10, 2);
+
+        for i in 0..5 {
+            let line = format!("line{}\n", i);
+            for ch in line.chars() {
+                terminal.put_char(ch);
+            }
+        }
+
+        assert!(terminal.scrollback.len() >= 3);
+        assert_eq!(terminal.visible_lines()[0], "line4");
+    }
+
+    #[test]
+    fn scroll_page_up_shows_older_content() {
+        let mut terminal = TerminalBuffer::new(10, 2);
+
+        for i in 0..5 {
+            let line = format!("line{}\n", i);
+            for ch in line.chars() {
+                terminal.put_char(ch);
+            }
+        }
+
+        terminal.scroll_page_up();
+        let display = terminal.display_cells();
+        assert_eq!(display[0][0].ch, 'l');
+        assert_eq!(display[0][1].ch, 'i');
+    }
+
+    #[test]
+    fn scroll_page_down_returns_toward_present() {
+        let mut terminal = TerminalBuffer::new(10, 2);
+
+        for i in 0..5 {
+            let line = format!("line{}\n", i);
+            for ch in line.chars() {
+                terminal.put_char(ch);
+            }
+        }
+
+        terminal.scroll_page_up();
+        terminal.scroll_page_down();
+        assert_eq!(terminal.scroll_offset, 0);
     }
 }

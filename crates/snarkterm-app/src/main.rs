@@ -14,7 +14,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -149,6 +149,7 @@ impl ApplicationHandler for WindowApp {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::KeyboardInput { event, .. } => state.handle_key(&event),
+            WindowEvent::ModifiersChanged(modifiers) => state.modifiers = modifiers.state(),
             WindowEvent::RedrawRequested => {
                 if let Err(error) = state.render() {
                     eprintln!("snarkterm: render failed: {error:#}");
@@ -175,6 +176,8 @@ struct GpuWindowState {
     pipeline: RenderPipeline,
     terminal: Arc<Mutex<TerminalBuffer>>,
     pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pty_master: Option<Box<dyn portable_pty::MasterPty>>,
+    modifiers: ModifiersState,
 }
 
 impl GpuWindowState {
@@ -235,7 +238,7 @@ impl GpuWindowState {
         let pipeline = create_text_pipeline(&device, config.format);
         let (cols, rows) = grid_size(config.width, config.height);
         let terminal = Arc::new(Mutex::new(TerminalBuffer::new(cols, rows)));
-        let pty_writer = spawn_window_shell(Arc::clone(&terminal))?;
+        let (pty_writer, pty_master) = spawn_window_shell(Arc::clone(&terminal))?;
 
         Ok(Self {
             window,
@@ -246,6 +249,8 @@ impl GpuWindowState {
             pipeline,
             terminal,
             pty_writer,
+            pty_master: Some(pty_master),
+            modifiers: ModifiersState::empty(),
         })
     }
 
@@ -261,12 +266,23 @@ impl GpuWindowState {
         if let Ok(mut terminal) = self.terminal.lock() {
             terminal.resize(cols, rows);
         }
+        if let Some(ref master) = self.pty_master {
+            let _ = master.resize(PtySize {
+                rows: rows as u16,
+                cols: cols as u16,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
     }
 
     fn handle_key(&mut self, key: &winit::event::KeyEvent) {
         if key.state != ElementState::Pressed {
             return;
         }
+
+        let ctrl = self.modifiers.control_key();
+        let alt = self.modifiers.alt_key();
 
         let bytes: Option<&[u8]> = match &key.logical_key {
             Key::Named(NamedKey::Enter) => Some(b"\r"),
@@ -280,6 +296,51 @@ impl GpuWindowState {
             Key::Named(NamedKey::Home) => Some(b"\x1b[H"),
             Key::Named(NamedKey::End) => Some(b"\x1b[F"),
             Key::Named(NamedKey::Delete) => Some(b"\x1b[3~"),
+            Key::Named(NamedKey::PageUp) => {
+                if let Ok(mut terminal) = self.terminal.lock() {
+                    terminal.scroll_page_up();
+                }
+                None
+            }
+            Key::Named(NamedKey::PageDown) => {
+                if let Ok(mut terminal) = self.terminal.lock() {
+                    terminal.scroll_page_down();
+                }
+                None
+            }
+            Key::Character(ch) if ctrl => match ch.as_str() {
+                "c" => Some(b"\x03"),
+                "d" => Some(b"\x04"),
+                "z" => Some(b"\x1a"),
+                "l" => Some(b"\x0c"),
+                "a" => Some(b"\x01"),
+                "e" => Some(b"\x05"),
+                "k" => Some(b"\x0b"),
+                "u" => Some(b"\x15"),
+                "w" => Some(b"\x17"),
+                "r" => Some(b"\x12"),
+                "s" => Some(b"\x13"),
+                "g" => Some(b"\x07"),
+                _ => {
+                    if let Some(byte) = ch.as_bytes().first() {
+                        if byte.is_ascii_lowercase() {
+                            let ctrl_byte = byte - b'a' + 1;
+                            Some(&[ctrl_byte])
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            },
+            Key::Character(ch) if alt => match ch.as_str() {
+                "b" => Some(b"\x1bb"),
+                "f" => Some(b"\x1bf"),
+                "d" => Some(b"\x1bd"),
+                "<" => Some(b"\x1b<"),
+                _ => None,
+            },
             _ => key.text.as_ref().map(|text| text.as_bytes()),
         };
 
@@ -355,7 +416,7 @@ impl GpuWindowState {
         let width = self.config.width as f32;
         let height = self.config.height as f32;
 
-        for (row, line) in terminal.cells().iter().enumerate() {
+        for (row, line) in terminal.display_cells().iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
                 let x = GRID_MARGIN_X + col as f32 * CELL_W;
                 let y = GRID_MARGIN_Y + row as f32 * CELL_H;
@@ -378,6 +439,30 @@ impl GpuWindowState {
                         x,
                         y,
                         GLYPH_PIXEL,
+                        width,
+                        height,
+                        cell.fg.as_array(),
+                    );
+                }
+                if cell.underline {
+                    push_rect(
+                        &mut vertices,
+                        x,
+                        y + 14.0,
+                        8.0,
+                        1.0,
+                        width,
+                        height,
+                        cell.fg.as_array(),
+                    );
+                }
+                if cell.strikethrough {
+                    push_rect(
+                        &mut vertices,
+                        x,
+                        y + 7.0,
+                        8.0,
+                        1.0,
                         width,
                         height,
                         cell.fg.as_array(),
@@ -409,7 +494,9 @@ fn grid_size(width: u32, height: u32) -> (usize, usize) {
     (cols, rows)
 }
 
-fn spawn_window_shell(terminal: Arc<Mutex<TerminalBuffer>>) -> Result<Arc<Mutex<Box<dyn Write + Send>>>> {
+fn spawn_window_shell(
+    terminal: Arc<Mutex<TerminalBuffer>>,
+) -> Result<(Arc<Mutex<Box<dyn Write + Send>>>, Box<dyn portable_pty::MasterPty>)> {
     let shell = user_shell();
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -457,7 +544,7 @@ fn spawn_window_shell(terminal: Arc<Mutex<TerminalBuffer>>) -> Result<Arc<Mutex<
         let _ = child.wait();
     });
 
-    Ok(writer)
+    Ok((writer, pair.master))
 }
 
 fn create_text_pipeline(device: &Device, format: wgpu::TextureFormat) -> RenderPipeline {
@@ -864,5 +951,11 @@ mod tests {
     #[test]
     fn grid_size_uses_window_dimensions() {
         assert_eq!(super::grid_size(1100, 720), (106, 42));
+    }
+
+    #[test]
+    fn ctrl_c_is_x03() {
+        let bytes = b"\x03";
+        assert_eq!(bytes[0], 0x03);
     }
 }
