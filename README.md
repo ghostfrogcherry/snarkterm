@@ -31,7 +31,8 @@ Current reality, because marketing is how software lies to itself:
 - Usable preview: basic keyboard input forwarding in the native window.
 - Usable preview: fixed terminal grid with basic CSI cursor movement, clear screen, clear line, and OSC skipping.
 - Usable preview: SGR foreground colors, including ANSI colors and 24-bit truecolor.
-- Planned: full VT/xterm parser, scrollback, background colors, text attributes, and proper font shaping inside the native GPU window.
+- Usable preview: SGR background colors, bold/dim intensity, and window-size-based grid resizing.
+- Planned: full VT/xterm parser, scrollback, richer text attributes, and proper font shaping inside the native GPU window.
 - Planned: real snark gutter instead of command-mode stderr commentary.
 - Planned: shell integration, rules, stats, Ollama, plugins, tabs, and splits.
 
@@ -61,7 +62,7 @@ Launch the native GPU window preview:
 cargo run -p snarkterm-app --bin snarkterm -- --window
 ```
 
-The native window currently uses a tiny built-in bitmap font and a shared terminal grid/parser from `snarkterm-core`. It can show basic shell prompts and command output, handle common cursor movement/clear sequences, skip OSC title sequences, and render foreground colors. It is not yet a full terminal emulator. It is, however, no longer just a dark rectangle pondering its LinkedIn announcement.
+The native window currently uses a tiny built-in bitmap font and a shared terminal grid/parser from `snarkterm-core`. It can show basic shell prompts and command output, handle common cursor movement/clear sequences, skip OSC title sequences, render foreground/background colors, and resize its grid from the window dimensions. It is not yet a full terminal emulator. It is, however, no longer just a dark rectangle pondering its LinkedIn announcement.
 
 Install locally with Cargo:
 
@@ -103,6 +104,8 @@ Known limitations:
 - Native window has a fixed grid and basic CSI parser.
 - Terminal grid/parser lives in `snarkterm-core` instead of the app binary.
 - Foreground SGR colors render in the native GPU window.
+- Background SGR colors and bold/dim intensity render in the native GPU window.
+- Native grid resizes based on window dimensions.
 - No scrollback owned by SnarkTerm yet.
 - No tabs/splits yet.
 - No side gutter yet.

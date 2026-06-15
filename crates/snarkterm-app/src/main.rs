@@ -18,6 +18,11 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GRID_MARGIN_X: f32 = 16.0;
+const GRID_MARGIN_Y: f32 = 18.0;
+const CELL_W: f32 = 10.0;
+const CELL_H: f32 = 16.0;
+const GLYPH_PIXEL: f32 = 2.0;
 
 #[derive(Debug, Default)]
 struct Args {
@@ -228,7 +233,8 @@ impl GpuWindowState {
         };
         surface.configure(&device, &config);
         let pipeline = create_text_pipeline(&device, config.format);
-        let terminal = Arc::new(Mutex::new(TerminalBuffer::new(80, 36)));
+        let (cols, rows) = grid_size(config.width, config.height);
+        let terminal = Arc::new(Mutex::new(TerminalBuffer::new(cols, rows)));
         let pty_writer = spawn_window_shell(Arc::clone(&terminal))?;
 
         Ok(Self {
@@ -251,6 +257,10 @@ impl GpuWindowState {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        let (cols, rows) = grid_size(width, height);
+        if let Ok(mut terminal) = self.terminal.lock() {
+            terminal.resize(cols, rows);
+        }
     }
 
     fn handle_key(&mut self, key: &winit::event::KeyEvent) {
@@ -342,36 +352,42 @@ impl GpuWindowState {
         };
 
         let mut vertices = Vec::new();
-        let margin_x = 16.0;
-        let margin_y = 18.0;
-        let cell_w = 10.0;
-        let cell_h = 16.0;
-        let pixel = 2.0;
         let width = self.config.width as f32;
         let height = self.config.height as f32;
 
         for (row, line) in terminal.cells().iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
-                if cell.ch == ' ' {
-                    continue;
+                let x = GRID_MARGIN_X + col as f32 * CELL_W;
+                let y = GRID_MARGIN_Y + row as f32 * CELL_H;
+                if let Some(bg) = cell.bg {
+                    push_rect(
+                        &mut vertices,
+                        x,
+                        y,
+                        CELL_W,
+                        CELL_H,
+                        width,
+                        height,
+                        bg.as_array(),
+                    );
                 }
-                let x = margin_x + col as f32 * cell_w;
-                let y = margin_y + row as f32 * cell_h;
-                push_glyph(
-                    &mut vertices,
-                    cell.ch,
-                    x,
-                    y,
-                    pixel,
-                    width,
-                    height,
-                    cell.fg.as_array(),
-                );
+                if cell.ch != ' ' {
+                    push_glyph(
+                        &mut vertices,
+                        cell.ch,
+                        x,
+                        y,
+                        GLYPH_PIXEL,
+                        width,
+                        height,
+                        cell.fg.as_array(),
+                    );
+                }
             }
         }
 
-        let cursor_x = margin_x + terminal.cursor_col as f32 * cell_w;
-        let cursor_y = margin_y + terminal.cursor_row as f32 * cell_h + 14.0;
+        let cursor_x = GRID_MARGIN_X + terminal.cursor_col as f32 * CELL_W;
+        let cursor_y = GRID_MARGIN_Y + terminal.cursor_row as f32 * CELL_H + 14.0;
         push_rect(
             &mut vertices,
             cursor_x,
@@ -385,6 +401,12 @@ impl GpuWindowState {
 
         vertices
     }
+}
+
+fn grid_size(width: u32, height: u32) -> (usize, usize) {
+    let cols = ((width as f32 - GRID_MARGIN_X * 2.0) / CELL_W).floor().max(1.0) as usize;
+    let rows = ((height as f32 - GRID_MARGIN_Y * 2.0) / CELL_H).floor().max(1.0) as usize;
+    (cols, rows)
 }
 
 fn spawn_window_shell(terminal: Arc<Mutex<TerminalBuffer>>) -> Result<Arc<Mutex<Box<dyn Write + Send>>>> {
@@ -837,5 +859,10 @@ mod tests {
     #[test]
     fn glyph_rows_supports_letters() {
         assert_ne!(super::glyph_rows('S'), [0; 7]);
+    }
+
+    #[test]
+    fn grid_size_uses_window_dimensions() {
+        assert_eq!(super::grid_size(1100, 720), (106, 42));
     }
 }

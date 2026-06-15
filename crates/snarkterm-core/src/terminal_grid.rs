@@ -12,6 +12,14 @@ impl RgbColor {
         b: 0.83,
     };
 
+    pub fn scale(self, factor: f32) -> Self {
+        Self {
+            r: (self.r * factor).clamp(0.0, 1.0),
+            g: (self.g * factor).clamp(0.0, 1.0),
+            b: (self.b * factor).clamp(0.0, 1.0),
+        }
+    }
+
     pub fn as_array(self) -> [f32; 3] {
         [self.r, self.g, self.b]
     }
@@ -21,6 +29,7 @@ impl RgbColor {
 pub struct Cell {
     pub ch: char,
     pub fg: RgbColor,
+    pub bg: Option<RgbColor>,
 }
 
 impl Default for Cell {
@@ -28,8 +37,43 @@ impl Default for Cell {
         Self {
             ch: ' ',
             fg: RgbColor::DEFAULT_FG,
+            bg: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GraphicsState {
+    fg: RgbColor,
+    bg: Option<RgbColor>,
+    intensity: Intensity,
+}
+
+impl Default for GraphicsState {
+    fn default() -> Self {
+        Self {
+            fg: RgbColor::DEFAULT_FG,
+            bg: None,
+            intensity: Intensity::Normal,
+        }
+    }
+}
+
+impl GraphicsState {
+    fn effective_fg(self) -> RgbColor {
+        match self.intensity {
+            Intensity::Normal => self.fg,
+            Intensity::Bold => self.fg.scale(1.25),
+            Intensity::Dim => self.fg.scale(0.55),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Intensity {
+    Normal,
+    Bold,
+    Dim,
 }
 
 #[derive(Debug)]
@@ -39,7 +83,7 @@ pub struct TerminalBuffer {
     pub cursor_col: usize,
     rows: usize,
     cols: usize,
-    current_fg: RgbColor,
+    graphics: GraphicsState,
 }
 
 impl TerminalBuffer {
@@ -52,7 +96,7 @@ impl TerminalBuffer {
             cursor_col: 0,
             rows,
             cols,
-            current_fg: RgbColor::DEFAULT_FG,
+            graphics: GraphicsState::default(),
         }
     }
 
@@ -78,7 +122,8 @@ impl TerminalBuffer {
         }
         self.cells[self.cursor_row][self.cursor_col] = Cell {
             ch,
-            fg: self.current_fg,
+            fg: self.graphics.effective_fg(),
+            bg: self.graphics.bg,
         };
         self.cursor_col += 1;
     }
@@ -141,100 +186,127 @@ impl TerminalBuffer {
         &self.cells
     }
 
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
+        let mut new_cells = vec![vec![Cell::default(); cols]; rows];
+        let copy_rows = self.rows.min(rows);
+        let copy_cols = self.cols.min(cols);
+
+        for (row, new_row) in new_cells.iter_mut().enumerate().take(copy_rows) {
+            new_row[..copy_cols].copy_from_slice(&self.cells[row][..copy_cols]);
+        }
+
+        self.cells = new_cells;
+        self.rows = rows;
+        self.cols = cols;
+        self.move_cursor(self.cursor_row, self.cursor_col);
+    }
+
     fn scroll_up(&mut self) {
         self.cells.remove(0);
         self.cells.push(vec![Cell::default(); self.cols]);
     }
 
     fn reset_graphics(&mut self) {
-        self.current_fg = RgbColor::DEFAULT_FG;
+        self.graphics = GraphicsState::default();
     }
 
     fn set_ansi_fg(&mut self, color: i32) {
-        self.current_fg = match color {
-            30 => RgbColor {
-                r: 0.20,
-                g: 0.22,
-                b: 0.28,
-            },
-            31 => RgbColor {
-                r: 1.00,
-                g: 0.23,
-                b: 0.42,
-            },
-            32 => RgbColor {
-                r: 0.54,
-                g: 1.00,
-                b: 0.50,
-            },
-            33 => RgbColor {
-                r: 1.00,
-                g: 0.72,
-                b: 0.42,
-            },
-            34 => RgbColor {
-                r: 0.38,
-                g: 0.62,
-                b: 1.00,
-            },
-            35 => RgbColor {
-                r: 0.86,
-                g: 0.45,
-                b: 1.00,
-            },
-            36 => RgbColor {
-                r: 0.00,
-                g: 0.96,
-                b: 0.83,
-            },
-            37 => RgbColor {
-                r: 0.85,
-                g: 0.87,
-                b: 0.91,
-            },
-            90 => RgbColor {
-                r: 0.43,
-                g: 0.46,
-                b: 0.54,
-            },
-            91 => RgbColor {
-                r: 1.00,
-                g: 0.35,
-                b: 0.50,
-            },
-            92 => RgbColor {
-                r: 0.65,
-                g: 1.00,
-                b: 0.61,
-            },
-            93 => RgbColor {
-                r: 1.00,
-                g: 0.82,
-                b: 0.50,
-            },
-            94 => RgbColor {
-                r: 0.54,
-                g: 0.72,
-                b: 1.00,
-            },
-            95 => RgbColor {
-                r: 0.94,
-                g: 0.58,
-                b: 1.00,
-            },
-            96 => RgbColor {
-                r: 0.31,
-                g: 1.00,
-                b: 0.88,
-            },
-            97 => RgbColor {
-                r: 1.00,
-                g: 1.00,
-                b: 1.00,
-            },
-            _ => self.current_fg,
-        };
+        if let Some(color) = ansi_color(color) {
+            self.graphics.fg = color;
+        }
     }
+
+    fn set_ansi_bg(&mut self, color: i32) {
+        self.graphics.bg = ansi_color(color - 10);
+    }
+}
+
+fn ansi_color(color: i32) -> Option<RgbColor> {
+    Some(match color {
+        30 => RgbColor {
+            r: 0.20,
+            g: 0.22,
+            b: 0.28,
+        },
+        31 => RgbColor {
+            r: 1.00,
+            g: 0.23,
+            b: 0.42,
+        },
+        32 => RgbColor {
+            r: 0.54,
+            g: 1.00,
+            b: 0.50,
+        },
+        33 => RgbColor {
+            r: 1.00,
+            g: 0.72,
+            b: 0.42,
+        },
+        34 => RgbColor {
+            r: 0.38,
+            g: 0.62,
+            b: 1.00,
+        },
+        35 => RgbColor {
+            r: 0.86,
+            g: 0.45,
+            b: 1.00,
+        },
+        36 => RgbColor {
+            r: 0.00,
+            g: 0.96,
+            b: 0.83,
+        },
+        37 => RgbColor {
+            r: 0.85,
+            g: 0.87,
+            b: 0.91,
+        },
+        90 => RgbColor {
+            r: 0.43,
+            g: 0.46,
+            b: 0.54,
+        },
+        91 => RgbColor {
+            r: 1.00,
+            g: 0.35,
+            b: 0.50,
+        },
+        92 => RgbColor {
+            r: 0.65,
+            g: 1.00,
+            b: 0.61,
+        },
+        93 => RgbColor {
+            r: 1.00,
+            g: 0.82,
+            b: 0.50,
+        },
+        94 => RgbColor {
+            r: 0.54,
+            g: 0.72,
+            b: 1.00,
+        },
+        95 => RgbColor {
+            r: 0.94,
+            g: 0.58,
+            b: 1.00,
+        },
+        96 => RgbColor {
+            r: 0.31,
+            g: 1.00,
+            b: 0.88,
+        },
+        97 => RgbColor {
+            r: 1.00,
+            g: 1.00,
+            b: 1.00,
+        },
+        _ => return None,
+    })
 }
 
 #[derive(Default)]
@@ -337,19 +409,37 @@ fn apply_sgr(params: &[i32], terminal: &mut TerminalBuffer) {
     while let Some(param) = iter.next() {
         match param {
             0 => terminal.reset_graphics(),
+            1 => terminal.graphics.intensity = Intensity::Bold,
+            2 => terminal.graphics.intensity = Intensity::Dim,
+            22 => terminal.graphics.intensity = Intensity::Normal,
             30..=37 | 90..=97 => terminal.set_ansi_fg(param),
-            39 => terminal.current_fg = RgbColor::DEFAULT_FG,
+            39 => terminal.graphics.fg = RgbColor::DEFAULT_FG,
+            40..=47 | 100..=107 => terminal.set_ansi_bg(param),
+            49 => terminal.graphics.bg = None,
             38 => {
                 if iter.next() == Some(2) {
                     let (Some(r), Some(g), Some(b)) = (iter.next(), iter.next(), iter.next())
                     else {
                         continue;
                     };
-                    terminal.current_fg = RgbColor {
+                    terminal.graphics.fg = RgbColor {
                         r: (r.clamp(0, 255) as f32) / 255.0,
                         g: (g.clamp(0, 255) as f32) / 255.0,
                         b: (b.clamp(0, 255) as f32) / 255.0,
                     };
+                }
+            }
+            48 => {
+                if iter.next() == Some(2) {
+                    let (Some(r), Some(g), Some(b)) = (iter.next(), iter.next(), iter.next())
+                    else {
+                        continue;
+                    };
+                    terminal.graphics.bg = Some(RgbColor {
+                        r: (r.clamp(0, 255) as f32) / 255.0,
+                        g: (g.clamp(0, 255) as f32) / 255.0,
+                        b: (b.clamp(0, 255) as f32) / 255.0,
+                    });
                 }
             }
             _ => {}
@@ -451,5 +541,67 @@ mod tests {
                 b: 0.0
             }
         );
+    }
+
+    #[test]
+    fn parser_applies_background_color() {
+        let mut terminal = TerminalBuffer::new(20, 3);
+        let mut parser = OutputParser::default();
+
+        parser.feed(b"\x1b[44mB\x1b[49mN", &mut terminal);
+
+        assert_eq!(terminal.cells()[0][0].ch, 'B');
+        assert_eq!(
+            terminal.cells()[0][0].bg,
+            Some(RgbColor {
+                r: 0.38,
+                g: 0.62,
+                b: 1.00
+            })
+        );
+        assert_eq!(terminal.cells()[0][1].bg, None);
+    }
+
+    #[test]
+    fn parser_applies_truecolor_background() {
+        let mut terminal = TerminalBuffer::new(20, 3);
+        let mut parser = OutputParser::default();
+
+        parser.feed(b"\x1b[48;2;10;20;30mX", &mut terminal);
+
+        assert_eq!(
+            terminal.cells()[0][0].bg,
+            Some(RgbColor {
+                r: 10.0 / 255.0,
+                g: 20.0 / 255.0,
+                b: 30.0 / 255.0
+            })
+        );
+    }
+
+    #[test]
+    fn parser_applies_dim_intensity() {
+        let mut terminal = TerminalBuffer::new(20, 3);
+        let mut parser = OutputParser::default();
+
+        parser.feed(b"\x1b[2;31mD", &mut terminal);
+
+        let fg = terminal.cells()[0][0].fg;
+        assert!((fg.r - 0.55).abs() < 0.001);
+        assert!((fg.g - 0.1265).abs() < 0.001);
+        assert!((fg.b - 0.231).abs() < 0.001);
+    }
+
+    #[test]
+    fn resize_preserves_existing_cells() {
+        let mut terminal = TerminalBuffer::new(4, 2);
+
+        for ch in "ab\ncd".chars() {
+            terminal.put_char(ch);
+        }
+        terminal.resize(6, 3);
+
+        assert_eq!(terminal.visible_lines()[0], "ab");
+        assert_eq!(terminal.visible_lines()[1], "cd");
     }
 }
