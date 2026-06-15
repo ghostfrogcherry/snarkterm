@@ -27,7 +27,8 @@ Current reality, because marketing is how software lies to itself:
 - Usable: PTY-backed shell launch in the current terminal.
 - Usable: `snarkterm -c <COMMAND>` command mode with commentary.
 - Usable: basic CLI help/version behavior.
-- Planned: native GPU window and terminal grid rendering.
+- Usable preview: native `winit`/`wgpu` window with GPU surface initialization via `--window`.
+- Planned: terminal grid rendering inside the native GPU window.
 - Planned: real snark gutter instead of command-mode stderr commentary.
 - Planned: shell integration, rules, stats, Ollama, plugins, tabs, and splits.
 
@@ -49,6 +50,12 @@ Run a single command with commentary:
 
 ```sh
 cargo run -p snarkterm-app --bin snarkterm -- -c 'printf hello'
+```
+
+Launch the native GPU window preview:
+
+```sh
+cargo run -p snarkterm-app --bin snarkterm -- --window
 ```
 
 Install locally with Cargo:
@@ -83,11 +90,11 @@ snarkterm -c 'false' --no-commentary
 
 ## Current Product State
 
-The Rust workspace defines the crate boundaries and shared event types that future implementation work will build on. The `snarkterm` binary is intentionally minimal, but it is no longer a decorative README. It opens a real PTY, spawns your shell, forwards bytes, and restores raw mode on exit.
+The Rust workspace defines the crate boundaries and shared event types that future implementation work will build on. The `snarkterm` binary is intentionally minimal, but it is no longer a decorative README. It opens a real PTY, spawns your shell, forwards bytes, restores raw mode on exit, and can launch a native GPU window preview.
 
 Known limitations:
 
-- No GPU window yet.
+- GPU window exists, but terminal text rendering is not wired into it yet.
 - No scrollback owned by SnarkTerm yet.
 - No tabs/splits yet.
 - No side gutter yet.

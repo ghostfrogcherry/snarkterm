@@ -10,9 +10,12 @@ description = "SnarkTerm application entrypoint."
 anyhow.workspace = true
 crossterm.workspace = true
 portable-pty.workspace = true
+pollster.workspace = true
 snarkterm-core = { path = "../snarkterm-core" }
 snarkterm-config = { path = "../snarkterm-config" }
 tracing.workspace = true
+wgpu.workspace = true
+winit.workspace = true
 
 [[bin]]
 name = "snarkterm"
