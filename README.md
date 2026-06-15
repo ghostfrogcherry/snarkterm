@@ -27,8 +27,9 @@ Current reality, because marketing is how software lies to itself:
 - Usable: PTY-backed shell launch in the current terminal.
 - Usable: `snarkterm -c <COMMAND>` command mode with commentary.
 - Usable: basic CLI help/version behavior.
-- Usable preview: native `winit`/`wgpu` window with GPU surface initialization via `--window`.
-- Planned: terminal grid rendering inside the native GPU window.
+- Usable preview: native `winit`/`wgpu` window with live PTY output via `--window`.
+- Usable preview: basic keyboard input forwarding in the native window.
+- Planned: full VT/xterm parser and proper font shaping inside the native GPU window.
 - Planned: real snark gutter instead of command-mode stderr commentary.
 - Planned: shell integration, rules, stats, Ollama, plugins, tabs, and splits.
 
@@ -57,6 +58,8 @@ Launch the native GPU window preview:
 ```sh
 cargo run -p snarkterm-app --bin snarkterm -- --window
 ```
+
+The native window currently uses a tiny built-in bitmap font and a simple output parser. It can show basic shell prompts and command output, but it is not yet a full terminal emulator. It is, however, no longer just a dark rectangle pondering its LinkedIn announcement.
 
 Install locally with Cargo:
 
@@ -90,14 +93,15 @@ snarkterm -c 'false' --no-commentary
 
 ## Current Product State
 
-The Rust workspace defines the crate boundaries and shared event types that future implementation work will build on. The `snarkterm` binary is intentionally minimal, but it is no longer a decorative README. It opens a real PTY, spawns your shell, forwards bytes, restores raw mode on exit, and can launch a native GPU window preview.
+The Rust workspace defines the crate boundaries and shared event types that future implementation work will build on. The `snarkterm` binary is intentionally minimal, but it is no longer a decorative README. It opens a real PTY, spawns your shell, forwards bytes, restores raw mode on exit, and can launch a native GPU window with live shell output.
 
 Known limitations:
 
-- GPU window exists, but terminal text rendering is not wired into it yet.
+- GPU window renders basic bitmap terminal text from a live PTY.
 - No scrollback owned by SnarkTerm yet.
 - No tabs/splits yet.
 - No side gutter yet.
+- Native window parser is intentionally basic and strips many escape sequences.
 - Interactive mode depends on the host terminal emulator for display.
 - Resize handling is still basic.
 - Commentary in command mode prints to stderr until the real UI gutter exists.

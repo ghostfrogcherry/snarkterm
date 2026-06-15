@@ -8,6 +8,7 @@ description = "SnarkTerm application entrypoint."
 
 [dependencies]
 anyhow.workspace = true
+bytemuck.workspace = true
 crossterm.workspace = true
 portable-pty.workspace = true
 pollster.workspace = true

@@ -24,6 +24,7 @@ description = "A serious GPU terminal emulator with unserious judgment."
 
 [workspace.dependencies]
 anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 crossbeam-channel = "0.5"
 crossterm = "0.27"

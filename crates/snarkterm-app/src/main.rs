@@ -1,15 +1,19 @@
 use anyhow::{anyhow, Context, Result};
+use bytemuck::{Pod, Zeroable};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use wgpu::{Device, Queue, Surface, SurfaceConfiguration};
+use wgpu::util::DeviceExt;
+use wgpu::{Device, Queue, RenderPipeline, Surface, SurfaceConfiguration};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -138,6 +142,7 @@ impl ApplicationHandler for WindowApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::KeyboardInput { event, .. } => state.handle_key(&event),
             WindowEvent::RedrawRequested => {
                 if let Err(error) = state.render() {
                     eprintln!("snarkterm: render failed: {error:#}");
@@ -161,6 +166,9 @@ struct GpuWindowState {
     device: Device,
     queue: Queue,
     config: SurfaceConfiguration,
+    pipeline: RenderPipeline,
+    terminal: Arc<Mutex<TerminalBuffer>>,
+    pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
 impl GpuWindowState {
@@ -218,6 +226,9 @@ impl GpuWindowState {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+        let pipeline = create_text_pipeline(&device, config.format);
+        let terminal = Arc::new(Mutex::new(TerminalBuffer::new(80, 36)));
+        let pty_writer = spawn_window_shell(Arc::clone(&terminal))?;
 
         Ok(Self {
             window,
@@ -225,6 +236,9 @@ impl GpuWindowState {
             device,
             queue,
             config,
+            pipeline,
+            terminal,
+            pty_writer,
         })
     }
 
@@ -238,7 +252,29 @@ impl GpuWindowState {
         self.surface.configure(&self.device, &self.config);
     }
 
+    fn handle_key(&mut self, key: &winit::event::KeyEvent) {
+        if key.state != ElementState::Pressed {
+            return;
+        }
+
+        let bytes: Option<&[u8]> = match &key.logical_key {
+            Key::Named(NamedKey::Enter) => Some(b"\r"),
+            Key::Named(NamedKey::Tab) => Some(b"\t"),
+            Key::Named(NamedKey::Backspace) => Some(b"\x7f"),
+            Key::Named(NamedKey::Escape) => Some(b"\x1b"),
+            _ => key.text.as_ref().map(|text| text.as_bytes()),
+        };
+
+        if let Some(bytes) = bytes {
+            if let Ok(mut writer) = self.pty_writer.lock() {
+                let _ = writer.write_all(bytes);
+                let _ = writer.flush();
+            }
+        }
+    }
+
     fn render(&mut self) -> Result<()> {
+        let vertices = self.text_vertices();
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -249,6 +285,11 @@ impl GpuWindowState {
             Err(error) => return Err(anyhow!(error)),
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("snarkterm-text-vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -256,7 +297,7 @@ impl GpuWindowState {
             });
 
         {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("snarkterm-background-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -275,11 +316,398 @@ impl GpuWindowState {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            if !vertices.is_empty() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.draw(0..vertices.len() as u32, 0..1);
+            }
         }
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         Ok(())
+    }
+
+    fn text_vertices(&self) -> Vec<Vertex> {
+        let Ok(terminal) = self.terminal.lock() else {
+            return Vec::new();
+        };
+
+        let mut vertices = Vec::new();
+        let margin_x = 16.0;
+        let margin_y = 18.0;
+        let cell_w = 10.0;
+        let cell_h = 16.0;
+        let pixel = 2.0;
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+
+        for (row, line) in terminal.visible_lines().iter().enumerate() {
+            for (col, ch) in line.chars().enumerate() {
+                if ch == ' ' {
+                    continue;
+                }
+                let x = margin_x + col as f32 * cell_w;
+                let y = margin_y + row as f32 * cell_h;
+                push_glyph(&mut vertices, ch, x, y, pixel, width, height);
+            }
+        }
+
+        vertices
+    }
+}
+
+fn spawn_window_shell(terminal: Arc<Mutex<TerminalBuffer>>) -> Result<Arc<Mutex<Box<dyn Write + Send>>>> {
+    let shell = user_shell();
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 36,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .context("failed to open window PTY")?;
+    let mut command = CommandBuilder::new(&shell);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("SNARKTERM", "1");
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .with_context(|| format!("failed to spawn shell '{shell}'"))?;
+    drop(pair.slave);
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .context("failed to clone window PTY reader")?;
+    let writer = Arc::new(Mutex::new(
+        pair.master
+            .take_writer()
+            .context("failed to take window PTY writer")?,
+    ));
+
+    thread::spawn(move || {
+        let mut parser = OutputParser::default();
+        let mut buffer = [0; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    if let Ok(mut terminal) = terminal.lock() {
+                        parser.feed(&buffer[..read], &mut terminal);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = child.wait();
+    });
+
+    Ok(writer)
+}
+
+fn create_text_pipeline(device: &Device, format: wgpu::TextureFormat) -> RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("snarkterm-bitmap-text-shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            r#"
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(@location(0) position: vec2<f32>, @location(1) color: vec3<f32>) -> VertexOut {
+    var out: VertexOut;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}
+"#
+            .into(),
+        ),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("snarkterm-text-pipeline-layout"),
+        bind_group_layouts: &[],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("snarkterm-text-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[Vertex::layout()],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    })
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Vertex {
+    position: [f32; 2],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
+}
+
+fn push_glyph(vertices: &mut Vec<Vertex>, ch: char, x: f32, y: f32, pixel: f32, width: f32, height: f32) {
+    let color = [0.0, 0.96, 0.83];
+    for (row, bits) in glyph_rows(ch).iter().enumerate() {
+        for col in 0..5 {
+            if bits & (1 << (4 - col)) != 0 {
+                push_rect(
+                    vertices,
+                    x + col as f32 * pixel,
+                    y + row as f32 * pixel,
+                    pixel,
+                    pixel,
+                    width,
+                    height,
+                    color,
+                );
+            }
+        }
+    }
+}
+
+fn push_rect(
+    vertices: &mut Vec<Vertex>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    screen_w: f32,
+    screen_h: f32,
+    color: [f32; 3],
+) {
+    let x1 = x / screen_w * 2.0 - 1.0;
+    let y1 = 1.0 - y / screen_h * 2.0;
+    let x2 = (x + w) / screen_w * 2.0 - 1.0;
+    let y2 = 1.0 - (y + h) / screen_h * 2.0;
+    vertices.extend_from_slice(&[
+        Vertex { position: [x1, y1], color },
+        Vertex { position: [x2, y1], color },
+        Vertex { position: [x2, y2], color },
+        Vertex { position: [x1, y1], color },
+        Vertex { position: [x2, y2], color },
+        Vertex { position: [x1, y2], color },
+    ]);
+}
+
+fn glyph_rows(ch: char) -> [u8; 7] {
+    match ch.to_ascii_uppercase() {
+        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
+        'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
+        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
+        'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        'J' => [0b00001, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110],
+        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
+        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
+        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+        '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
+        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+        '5' => [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110],
+        '6' => [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
+        '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100],
+        ',' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100, 0b01000],
+        ':' => [0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000],
+        ';' => [0b00000, 0b01100, 0b01100, 0b00000, 0b00100, 0b00100, 0b01000],
+        '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
+        '_' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111],
+        '/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
+        '\\' => [0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001],
+        '|' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        '>' => [0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000],
+        '<' => [0b00001, 0b00010, 0b00100, 0b01000, 0b00100, 0b00010, 0b00001],
+        '=' => [0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
+        '+' => [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000],
+        '*' => [0b00000, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00000],
+        '$' => [0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100],
+        '#' => [0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010],
+        '!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100],
+        '?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100],
+        '(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
+        ')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
+        '[' => [0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110],
+        ']' => [0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110],
+        '{' => [0b00010, 0b00100, 0b00100, 0b01000, 0b00100, 0b00100, 0b00010],
+        '}' => [0b01000, 0b00100, 0b00100, 0b00010, 0b00100, 0b00100, 0b01000],
+        '~' => [0b00000, 0b00000, 0b01000, 0b10101, 0b00010, 0b00000, 0b00000],
+        '@' => [0b01110, 0b10001, 0b10111, 0b10101, 0b10111, 0b10000, 0b01110],
+        '&' => [0b01100, 0b10010, 0b10100, 0b01000, 0b10101, 0b10010, 0b01101],
+        '%' => [0b11000, 0b11001, 0b00010, 0b00100, 0b01000, 0b10011, 0b00011],
+        '^' => [0b00100, 0b01010, 0b10001, 0b00000, 0b00000, 0b00000, 0b00000],
+        '"' => [0b01010, 0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000],
+        '\'' => [0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000],
+        '`' => [0b01000, 0b00100, 0b00010, 0b00000, 0b00000, 0b00000, 0b00000],
+        _ => [0b11111, 0b10001, 0b00101, 0b01001, 0b10100, 0b10001, 0b11111],
+    }
+}
+
+#[derive(Debug)]
+struct TerminalBuffer {
+    lines: Vec<String>,
+    cursor_col: usize,
+    max_lines: usize,
+    cols: usize,
+}
+
+impl TerminalBuffer {
+    fn new(cols: usize, rows: usize) -> Self {
+        Self {
+            lines: vec![String::new()],
+            cursor_col: 0,
+            max_lines: rows.max(1),
+            cols,
+        }
+    }
+
+    fn put_char(&mut self, ch: char) {
+        if ch == '\n' {
+            self.newline();
+            return;
+        }
+        if ch == '\r' {
+            self.cursor_col = 0;
+            return;
+        }
+        if ch == '\u{8}' || ch == '\u{7f}' {
+            self.backspace();
+            return;
+        }
+        if ch.is_control() {
+            return;
+        }
+
+        if self.cursor_col >= self.cols {
+            self.newline();
+        }
+        let line = self.lines.last_mut().expect("terminal always has a line");
+        while line.len() < self.cursor_col {
+            line.push(' ');
+        }
+        if self.cursor_col < line.len() {
+            line.replace_range(self.cursor_col..self.cursor_col + 1, &ch.to_string());
+        } else {
+            line.push(ch);
+        }
+        self.cursor_col += 1;
+    }
+
+    fn newline(&mut self) {
+        self.lines.push(String::new());
+        self.cursor_col = 0;
+        if self.lines.len() > self.max_lines {
+            self.lines.remove(0);
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_col == 0 {
+            return;
+        }
+        self.cursor_col -= 1;
+        if let Some(line) = self.lines.last_mut() {
+            if self.cursor_col < line.len() {
+                line.remove(self.cursor_col);
+            }
+        }
+    }
+
+    fn visible_lines(&self) -> &[String] {
+        &self.lines
+    }
+}
+
+#[derive(Default)]
+struct OutputParser {
+    escape: bool,
+}
+
+impl OutputParser {
+    fn feed(&mut self, bytes: &[u8], terminal: &mut TerminalBuffer) {
+        for byte in bytes {
+            let ch = *byte as char;
+            if self.escape {
+                if ch.is_ascii_alphabetic() || ch == '\u{7}' {
+                    self.escape = false;
+                }
+                continue;
+            }
+            if ch == '\x1b' {
+                self.escape = true;
+                continue;
+            }
+            terminal.put_char(ch);
+        }
     }
 }
 
@@ -465,5 +893,22 @@ mod tests {
         let comment = command_commentary("git push --force", 0);
 
         assert!(comment.contains("future coworker"));
+    }
+
+    #[test]
+    fn terminal_buffer_tracks_new_lines() {
+        let mut terminal = super::TerminalBuffer::new(80, 3);
+
+        for ch in "hello\nworld".chars() {
+            terminal.put_char(ch);
+        }
+
+        assert_eq!(terminal.visible_lines()[0], "hello");
+        assert_eq!(terminal.visible_lines()[1], "world");
+    }
+
+    #[test]
+    fn glyph_rows_supports_letters() {
+        assert_ne!(super::glyph_rows('S'), [0; 7]);
     }
 }
