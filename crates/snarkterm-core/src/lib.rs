@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
+mod terminal_grid;
+
+pub use terminal_grid::{Cell, OutputParser, RgbColor, TerminalBuffer};
+
 pub type SessionId = Uuid;
 pub type CommandId = Uuid;
 
@@ -89,7 +93,11 @@ pub struct Commentary {
 }
 
 impl Commentary {
-    pub fn new(text: impl Into<String>, severity: CommentarySeverity, personality: PersonalityProfile) -> Self {
+    pub fn new(
+        text: impl Into<String>,
+        severity: CommentarySeverity,
+        personality: PersonalityProfile,
+    ) -> Self {
         Self {
             text: text.into(),
             severity,

@@ -30,7 +30,8 @@ Current reality, because marketing is how software lies to itself:
 - Usable preview: native `winit`/`wgpu` window with live PTY output via `--window`.
 - Usable preview: basic keyboard input forwarding in the native window.
 - Usable preview: fixed terminal grid with basic CSI cursor movement, clear screen, clear line, and OSC skipping.
-- Planned: full VT/xterm parser, scrollback, color attributes, and proper font shaping inside the native GPU window.
+- Usable preview: SGR foreground colors, including ANSI colors and 24-bit truecolor.
+- Planned: full VT/xterm parser, scrollback, background colors, text attributes, and proper font shaping inside the native GPU window.
 - Planned: real snark gutter instead of command-mode stderr commentary.
 - Planned: shell integration, rules, stats, Ollama, plugins, tabs, and splits.
 
@@ -60,7 +61,7 @@ Launch the native GPU window preview:
 cargo run -p snarkterm-app --bin snarkterm -- --window
 ```
 
-The native window currently uses a tiny built-in bitmap font and a small terminal grid/parser. It can show basic shell prompts and command output, handle common cursor movement/clear sequences, and skip OSC title sequences. It is not yet a full terminal emulator. It is, however, no longer just a dark rectangle pondering its LinkedIn announcement.
+The native window currently uses a tiny built-in bitmap font and a shared terminal grid/parser from `snarkterm-core`. It can show basic shell prompts and command output, handle common cursor movement/clear sequences, skip OSC title sequences, and render foreground colors. It is not yet a full terminal emulator. It is, however, no longer just a dark rectangle pondering its LinkedIn announcement.
 
 Install locally with Cargo:
 
@@ -100,6 +101,8 @@ Known limitations:
 
 - GPU window renders basic bitmap terminal text from a live PTY.
 - Native window has a fixed grid and basic CSI parser.
+- Terminal grid/parser lives in `snarkterm-core` instead of the app binary.
+- Foreground SGR colors render in the native GPU window.
 - No scrollback owned by SnarkTerm yet.
 - No tabs/splits yet.
 - No side gutter yet.

@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use snarkterm_core::{OutputParser, TerminalBuffer};
 use std::env;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
@@ -349,14 +350,23 @@ impl GpuWindowState {
         let width = self.config.width as f32;
         let height = self.config.height as f32;
 
-        for (row, line) in terminal.visible_lines().iter().enumerate() {
-            for (col, ch) in line.chars().enumerate() {
-                if ch == ' ' {
+        for (row, line) in terminal.cells().iter().enumerate() {
+            for (col, cell) in line.iter().enumerate() {
+                if cell.ch == ' ' {
                     continue;
                 }
                 let x = margin_x + col as f32 * cell_w;
                 let y = margin_y + row as f32 * cell_h;
-                push_glyph(&mut vertices, ch, x, y, pixel, width, height);
+                push_glyph(
+                    &mut vertices,
+                    cell.ch,
+                    x,
+                    y,
+                    pixel,
+                    width,
+                    height,
+                    cell.fg.as_array(),
+                );
             }
         }
 
@@ -514,8 +524,16 @@ impl Vertex {
     }
 }
 
-fn push_glyph(vertices: &mut Vec<Vertex>, ch: char, x: f32, y: f32, pixel: f32, width: f32, height: f32) {
-    let color = [0.0, 0.96, 0.83];
+fn push_glyph(
+    vertices: &mut Vec<Vertex>,
+    ch: char,
+    x: f32,
+    y: f32,
+    pixel: f32,
+    width: f32,
+    height: f32,
+    color: [f32; 3],
+) {
     for (row, bits) in glyph_rows(ch).iter().enumerate() {
         for col in 0..5 {
             if bits & (1 << (4 - col)) != 0 {
@@ -630,207 +648,6 @@ fn glyph_rows(ch: char) -> [u8; 7] {
         '`' => [0b01000, 0b00100, 0b00010, 0b00000, 0b00000, 0b00000, 0b00000],
         _ => [0b11111, 0b10001, 0b00101, 0b01001, 0b10100, 0b10001, 0b11111],
     }
-}
-
-#[derive(Debug)]
-struct TerminalBuffer {
-    cells: Vec<Vec<char>>,
-    cursor_row: usize,
-    cursor_col: usize,
-    rows: usize,
-    cols: usize,
-}
-
-impl TerminalBuffer {
-    fn new(cols: usize, rows: usize) -> Self {
-        Self {
-            cells: vec![vec![' '; cols]; rows.max(1)],
-            cursor_row: 0,
-            cursor_col: 0,
-            rows: rows.max(1),
-            cols,
-        }
-    }
-
-    fn put_char(&mut self, ch: char) {
-        if ch == '\n' {
-            self.newline();
-            return;
-        }
-        if ch == '\r' {
-            self.cursor_col = 0;
-            return;
-        }
-        if ch == '\u{8}' || ch == '\u{7f}' {
-            self.backspace();
-            return;
-        }
-        if ch.is_control() {
-            return;
-        }
-
-        if self.cursor_col >= self.cols {
-            self.newline();
-        }
-        self.cells[self.cursor_row][self.cursor_col] = ch;
-        self.cursor_col += 1;
-    }
-
-    fn newline(&mut self) {
-        self.cursor_col = 0;
-        if self.cursor_row + 1 >= self.rows {
-            self.scroll_up();
-        } else {
-            self.cursor_row += 1;
-        }
-    }
-
-    fn backspace(&mut self) {
-        if self.cursor_col == 0 {
-            return;
-        }
-        self.cursor_col -= 1;
-        self.cells[self.cursor_row][self.cursor_col] = ' ';
-    }
-
-    fn move_cursor(&mut self, row: usize, col: usize) {
-        self.cursor_row = row.min(self.rows.saturating_sub(1));
-        self.cursor_col = col.min(self.cols.saturating_sub(1));
-    }
-
-    fn move_relative(&mut self, row_delta: isize, col_delta: isize) {
-        let row = self.cursor_row.saturating_add_signed(row_delta);
-        let col = self.cursor_col.saturating_add_signed(col_delta);
-        self.move_cursor(row, col);
-    }
-
-    fn clear_screen(&mut self) {
-        for row in &mut self.cells {
-            row.fill(' ');
-        }
-        self.move_cursor(0, 0);
-    }
-
-    fn clear_line_from_cursor(&mut self) {
-        for col in self.cursor_col..self.cols {
-            self.cells[self.cursor_row][col] = ' ';
-        }
-    }
-
-    fn scroll_up(&mut self) {
-        self.cells.remove(0);
-        self.cells.push(vec![' '; self.cols]);
-    }
-
-    fn visible_lines(&self) -> Vec<String> {
-        self.cells
-            .iter()
-            .map(|row| row.iter().collect::<String>().trim_end().to_string())
-            .collect()
-    }
-}
-
-#[derive(Default)]
-struct OutputParser {
-    state: ParserState,
-    csi: String,
-}
-
-impl OutputParser {
-    fn feed(&mut self, bytes: &[u8], terminal: &mut TerminalBuffer) {
-        for byte in bytes {
-            let ch = *byte as char;
-            match self.state {
-                ParserState::Ground => {
-                    if ch == '\x1b' {
-                        self.state = ParserState::Escape;
-                    } else {
-                        terminal.put_char(ch);
-                    }
-                }
-                ParserState::Escape => {
-                    if ch == '[' {
-                        self.csi.clear();
-                        self.state = ParserState::Csi;
-                    } else if ch == ']' {
-                        self.state = ParserState::Osc;
-                    } else if ch == 'c' {
-                        terminal.clear_screen();
-                        self.state = ParserState::Ground;
-                    } else {
-                        self.state = ParserState::Ground;
-                    }
-                }
-                ParserState::Csi => {
-                    if ch.is_ascii_alphabetic() || ch == '~' {
-                        self.apply_csi(ch, terminal);
-                        self.state = ParserState::Ground;
-                    } else if self.csi.len() < 32 {
-                        self.csi.push(ch);
-                    }
-                }
-                ParserState::Osc => {
-                    if ch == '\u{7}' {
-                        self.state = ParserState::Ground;
-                    } else if ch == '\x1b' {
-                        self.state = ParserState::OscEscape;
-                    }
-                }
-                ParserState::OscEscape => {
-                    self.state = ParserState::Ground;
-                }
-            }
-        }
-    }
-
-    fn apply_csi(&self, command: char, terminal: &mut TerminalBuffer) {
-        let params = parse_csi_params(&self.csi);
-        let first = params.first().copied().unwrap_or(1).max(1) as usize;
-
-        match command {
-            'A' => terminal.move_relative(-(first as isize), 0),
-            'B' => terminal.move_relative(first as isize, 0),
-            'C' => terminal.move_relative(0, first as isize),
-            'D' => terminal.move_relative(0, -(first as isize)),
-            'G' => terminal.move_cursor(terminal.cursor_row, first.saturating_sub(1)),
-            'H' | 'f' => {
-                let row = params.first().copied().unwrap_or(1).max(1) as usize - 1;
-                let col = params.get(1).copied().unwrap_or(1).max(1) as usize - 1;
-                terminal.move_cursor(row, col);
-            }
-            'J' => {
-                if params.first().copied().unwrap_or(0) == 2 {
-                    terminal.clear_screen();
-                }
-            }
-            'K' => terminal.clear_line_from_cursor(),
-            'm' => {}
-            _ => {}
-        }
-    }
-}
-
-#[derive(Default)]
-enum ParserState {
-    #[default]
-    Ground,
-    Escape,
-    Csi,
-    Osc,
-    OscEscape,
-}
-
-fn parse_csi_params(raw: &str) -> Vec<i32> {
-    raw.trim_start_matches('?')
-        .split(';')
-        .filter_map(|part| {
-            if part.is_empty() {
-                Some(0)
-            } else {
-                part.parse().ok()
-            }
-        })
-        .collect()
 }
 
 fn run_interactive() -> Result<u8> {
@@ -1018,50 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_buffer_tracks_new_lines() {
-        let mut terminal = super::TerminalBuffer::new(80, 3);
-
-        for ch in "hello\nworld".chars() {
-            terminal.put_char(ch);
-        }
-
-        assert_eq!(terminal.visible_lines()[0], "hello");
-        assert_eq!(terminal.visible_lines()[1], "world");
-    }
-
-    #[test]
     fn glyph_rows_supports_letters() {
         assert_ne!(super::glyph_rows('S'), [0; 7]);
-    }
-
-    #[test]
-    fn parser_applies_cursor_positioning() {
-        let mut terminal = super::TerminalBuffer::new(10, 3);
-        let mut parser = super::OutputParser::default();
-
-        parser.feed(b"abc\x1b[2;3HZ", &mut terminal);
-
-        assert_eq!(terminal.visible_lines()[0], "abc");
-        assert_eq!(terminal.visible_lines()[1], "  Z");
-    }
-
-    #[test]
-    fn parser_clears_screen() {
-        let mut terminal = super::TerminalBuffer::new(10, 3);
-        let mut parser = super::OutputParser::default();
-
-        parser.feed(b"abc\x1b[2JZ", &mut terminal);
-
-        assert_eq!(terminal.visible_lines()[0], "Z");
-    }
-
-    #[test]
-    fn parser_skips_osc_sequences() {
-        let mut terminal = super::TerminalBuffer::new(20, 3);
-        let mut parser = super::OutputParser::default();
-
-        parser.feed(b"a\x1b]0;title\x07b", &mut terminal);
-
-        assert_eq!(terminal.visible_lines()[0], "ab");
     }
 }
