@@ -1072,6 +1072,14 @@ fn command_commentary(command: &str, exit_code: u8) -> &'static str {
         "SnarkTerm: Security model replaced with vibes. Very modern."
     } else if command.contains("curl") && (command.contains("| sh") || command.contains("| bash")) {
         "SnarkTerm: A stranger's shell script, piped directly into trust. Inspirationally backwards."
+    } else if exit_code == 127 {
+        "SnarkTerm: Command not found. Either it doesn't exist, or it's hiding from you."
+    } else if exit_code == 126 {
+        "SnarkTerm: Permission denied. The file exists but wants nothing to do with you."
+    } else if exit_code == 130 {
+        "SnarkTerm: Interrupted. YouCtrl+C'd your way out of that one."
+    } else if exit_code == 137 {
+        "SnarkTerm: Killed. Something decided this process had lived long enough."
     } else if exit_code == 0 {
         "SnarkTerm: Exit code 0. A rare and beautiful creature, like a printer that works."
     } else {
@@ -1164,9 +1172,39 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_is_x03() {
-        let bytes = b"\x03";
-        assert_eq!(bytes[0], 0x03);
+    fn comments_on_command_not_found() {
+        let comment = command_commentary("asdfghjkl", 127);
+        assert!(comment.contains("not found"));
+    }
+
+    #[test]
+    fn comments_on_permission_denied() {
+        let comment = command_commentary("./myscript.sh", 126);
+        assert!(comment.contains("Permission denied"));
+    }
+
+    #[test]
+    fn comments_on_sigint() {
+        let comment = command_commentary("sleep 999", 130);
+        assert!(comment.contains("Interrupted"));
+    }
+
+    #[test]
+    fn comments_on_sigkill() {
+        let comment = command_commentary("heavy_process", 137);
+        assert!(comment.contains("Killed"));
+    }
+
+    #[test]
+    fn comments_on_success() {
+        let comment = command_commentary("echo hi", 0);
+        assert!(comment.contains("Exit code 0"));
+    }
+
+    #[test]
+    fn comments_on_generic_failure() {
+        let comment = command_commentary("make", 2);
+        assert!(comment.contains("failed"));
     }
 
     #[test]
