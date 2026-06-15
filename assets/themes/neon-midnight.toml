@@ -1,0 +1,12 @@
+[theme]
+name = "neon-midnight"
+background = "#080A0F"
+foreground = "#D8DEE9"
+accent = "#00F5D4"
+danger = "#FF3B6B"
+warning = "#FFB86B"
+success = "#8AFF80"
+panel_background = "#10131CCC"
+panel_border = "#00F5D455"
+cursor = "#00F5D4"
+selection = "#263248"

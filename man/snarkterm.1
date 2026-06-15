@@ -1,0 +1,134 @@
+.TH SNARKTERM 1 "June 2026" "SnarkTerm 0.1.0-alpha" "User Commands"
+.SH NAME
+snarkterm \- a GPU terminal emulator with judgment
+.SH SYNOPSIS
+.B snarkterm
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B SnarkTerm
+is a Linux terminal emulator designed to be fast, correct, GPU accelerated, and mildly disappointed.
+It provides PTY-backed shell sessions, tabs, splits, scrollback, search, themes, configurable keybindings, and a side-panel commentary gutter.
+.PP
+Unlike lesser rectangles, SnarkTerm observes command outcomes and comments on them. The commentary is rendered in a separate gutter and is never inserted into shell output, because corrupting stdout for a punchline is how civilizations decline.
+.SH OPTIONS
+.TP
+.B --config <path>
+Load a specific TOML configuration file.
+.TP
+.B --personality <professional|snarky|unhinged|british>
+Select the commentary profile. Defaults to snarky, because apparently silence was too mature.
+.TP
+.B --roast-intensity <0-100>
+Set how often and how sharply SnarkTerm comments. At 0, it behaves professionally. At 100, it starts developing theories about your incident reports.
+.TP
+.B --no-commentary
+Disable the snark gutter. Useful during meetings, screen shares, pair programming, or moments of personal fragility.
+.TP
+.B --work-mode
+Reduce weirdness. SnarkTerm remains dry but stops acting like your build log is a one-act tragedy.
+.TP
+.B --llm ollama
+Enable local Ollama commentary generation.
+.TP
+.B --model <name>
+Set the Ollama model, for example llama3.1.
+.TP
+.B --theme <name>
+Use a configured theme.
+.TP
+.B --print-default-config
+Print the default configuration and exit.
+.SH PERSONALITY LEVELS
+.TP
+.B professional
+Minimal and useful. Light wit only. The cardigan of modes.
+.TP
+.B snarky
+Default mode. Dry, observant, and only a little disappointed.
+.TP
+.B unhinged
+Chaotic but still readable. For users who want their terminal to sound like it has been awake through three deploy freezes.
+.TP
+.B british
+Formal, understated, and quietly devastating.
+.SH ROAST INTENSITY
+Roast intensity controls commentary frequency, sharpness, repeated-mistake references, long-running command impatience, and how much restraint the terminal pretends to have.
+.PP
+Recommended values:
+.IP "0-20"
+Work-safe. Almost emotionally available.
+.IP "21-60"
+Default dry commentary.
+.IP "61-85"
+Regular judgment with tasteful despair.
+.IP "86-100"
+The terminal is now documenting your choices for the incident report.
+.SH SHELL INTEGRATION
+SnarkTerm can install optional Bash, Zsh, and Fish hooks that emit private OSC 777 markers for command start, command end, exit status, duration, and working directory.
+.PP
+These markers are consumed by SnarkTerm and not displayed. If you see them, something has gone wrong, which is traditional.
+.SH FILES
+.TP
+.I ~/.config/snarkterm/config.toml
+User configuration.
+.TP
+.I ~/.local/share/snarkterm/snarkterm.sqlite3
+Local session statistics and achievements.
+.TP
+.I ~/.config/snarkterm/plugins/
+User-installed plugins.
+.TP
+.I ~/.config/snarkterm/shell/
+Shell integration snippets.
+.SH ENVIRONMENT
+.TP
+.B SNARKTERM_PROFILE
+Overrides the configured personality profile.
+.TP
+.B SNARKTERM_ROAST_INTENSITY
+Overrides roast intensity.
+.TP
+.B SNARKTERM_NO_COMMENTARY
+Disables commentary when set to 1.
+.TP
+.B TERM
+Set by SnarkTerm to an appropriate terminal value once terminfo is available.
+.SH EXAMPLES
+.TP
+Launch normally:
+.B snarkterm
+.TP
+Launch with reduced judgment:
+.B snarkterm --personality professional --roast-intensity 10
+.TP
+Launch in British mode:
+.B snarkterm --personality british
+.TP
+Enable local Ollama commentary:
+.B snarkterm --llm ollama --model llama3.1
+.TP
+Disable commentary for a meeting:
+.B snarkterm --no-commentary
+.SH WARNINGS
+SnarkTerm may warn about dangerous commands such as recursive deletes, force pushes, production Kubernetes operations, chmod 777, and curl-pipe-shell adventures.
+.PP
+By default, SnarkTerm warns but does not block. The user remains free to destroy things manually, as Unix intended.
+.SH ACHIEVEMENTS
+SnarkTerm can unlock achievements including Friday Deploy, Production Archaeologist, chmod 777 Enjoyer, Works On My Machine, Sudo Sommelier, Dependency Goblin, Restartomancer, Force Push Romantic, YAML Cartographer, The Build Is Still Running, Curl Pipe Philosopher, Incident Report Speedrun, Stack Overflow Archaeologist, npm Install Survivor, and Kubernetes Roulette.
+.SH BUGS
+SnarkTerm may occasionally be correct about you. This is not considered a bug.
+.PP
+Command detection depends on shell integration. Without it, SnarkTerm uses heuristics, also known as educated guessing with a nicer shirt.
+.PP
+LLM commentary may be less funny than canned commentary, which is a useful reminder that scale is not taste.
+.SH AUTHOR
+SnarkTerm contributors, and whichever future maintainer drew the short straw.
+.SH SEE ALSO
+.BR alacritty (1),
+.BR kitty (1),
+.BR wezterm (1),
+.BR ghostty (1),
+.BR bash (1),
+.BR zsh (1),
+.BR fish (1),
+.BR tmux (1)

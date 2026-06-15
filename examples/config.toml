@@ -1,0 +1,39 @@
+[ui]
+theme = "neon-midnight"
+font_family = "JetBrainsMono Nerd Font"
+font_size = 13.0
+snark_gutter = true
+gutter_width = 360
+transparency = 0.82
+
+[personality]
+profile = "snarky"
+roast_intensity = 65
+comment_on_success = true
+comment_on_failure = true
+comment_on_danger = true
+comment_on_long_running = true
+work_mode = false
+
+[llm]
+enabled = false
+provider = "ollama"
+model = "llama3.1"
+timeout_ms = 750
+redact_secrets = true
+
+[stats]
+enabled = true
+store_command_text = true
+store_raw_output = false
+
+[privacy]
+telemetry = false
+local_only = true
+
+[keybindings]
+split_horizontal = "Ctrl+Shift+H"
+split_vertical = "Ctrl+Shift+V"
+new_tab = "Ctrl+Shift+T"
+close_tab = "Ctrl+Shift+W"
+toggle_snark = "Ctrl+Shift+S"

@@ -1,0 +1,10 @@
+[package]
+name = "snarkterm-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command classification and safety rules for SnarkTerm."
+
+[dependencies]
+snarkterm-core = { path = "../snarkterm-core" }

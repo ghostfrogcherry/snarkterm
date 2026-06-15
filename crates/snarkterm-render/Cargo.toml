@@ -1,0 +1,12 @@
+[package]
+name = "snarkterm-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wgpu rendering pipeline for SnarkTerm."
+
+[dependencies]
+snarkterm-core = { path = "../snarkterm-core" }
+wgpu.workspace = true
+winit.workspace = true

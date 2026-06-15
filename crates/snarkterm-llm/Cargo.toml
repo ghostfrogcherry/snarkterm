@@ -1,0 +1,12 @@
+[package]
+name = "snarkterm-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Local LLM providers for SnarkTerm commentary."
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+tokio.workspace = true

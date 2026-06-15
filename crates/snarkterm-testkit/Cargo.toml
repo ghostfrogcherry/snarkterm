@@ -1,0 +1,10 @@
+[package]
+name = "snarkterm-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Test fixtures and compatibility harnesses for SnarkTerm."
+
+[dependencies]
+snarkterm-core = { path = "../snarkterm-core" }

@@ -1,0 +1,11 @@
+[package]
+name = "snarkterm-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sandboxed plugin loading for SnarkTerm."
+
+[dependencies]
+serde.workspace = true
+snarkterm-core = { path = "../snarkterm-core" }

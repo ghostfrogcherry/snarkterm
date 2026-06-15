@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/snarkterm-app",
+    "crates/snarkterm-core",
+    "crates/snarkterm-pty",
+    "crates/snarkterm-render",
+    "crates/snarkterm-ui",
+    "crates/snarkterm-personality",
+    "crates/snarkterm-rules",
+    "crates/snarkterm-plugins",
+    "crates/snarkterm-config",
+    "crates/snarkterm-db",
+    "crates/snarkterm-llm",
+    "crates/snarkterm-testkit",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OWNER/snarkterm"
+description = "A serious GPU terminal emulator with unserious judgment."
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+crossbeam-channel = "0.5"
+portable-pty = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+toml = "0.8"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+vte = "0.13"
+wgpu = "0.20"
+winit = "0.30"

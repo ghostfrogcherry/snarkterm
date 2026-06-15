@@ -1,0 +1,10 @@
+[package]
+name = "snarkterm-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite persistence for SnarkTerm sessions, stats, and achievements."
+
+[dependencies]
+rusqlite.workspace = true

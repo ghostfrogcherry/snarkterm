@@ -1,0 +1,12 @@
+[package]
+name = "snarkterm-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PTY session management and shell integration parsing for SnarkTerm."
+
+[dependencies]
+portable-pty.workspace = true
+snarkterm-core = { path = "../snarkterm-core" }
+thiserror.workspace = true

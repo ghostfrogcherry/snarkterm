@@ -1,0 +1,11 @@
+[package]
+name = "snarkterm-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tabs, splits, overlays, and UI state for SnarkTerm."
+
+[dependencies]
+serde.workspace = true
+snarkterm-core = { path = "../snarkterm-core" }
