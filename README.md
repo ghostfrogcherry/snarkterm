@@ -1,119 +1,96 @@
 # SnarkTerm
 
-SnarkTerm is a planned Linux terminal emulator written in Rust. It aims to provide a fast GPU-accelerated terminal with VT/xterm compatibility, tabs, splits, search, themes, and a sarcastic AI personality layer that comments on command outcomes without interfering with terminal I/O.
+A GPU-accelerated Linux terminal emulator written in Rust with a sarcastic AI personality.
 
-The core rule is simple: SnarkTerm must remain a correct, usable terminal even if the personality engine, plugins, database, or local LLM support fail.
+## Features
 
-## Planned Features
+- **Native GPU rendering** via `wgpu` with proper monospace font rasterization (`ab_glyph`)
+- **Real PTY integration** — launches your actual shell with full terminal support
+- **Scrollback buffer** with Page Up/Down navigation
+- **Color support** — ANSI 16-color and 24-bit truecolor via SGR sequences
+- **Text attributes** — bold, dim, italic, underline, reverse video, strikethrough
+- **Keyboard shortcuts** — Ctrl+C/D/Z/L, function keys F1–F12, arrow keys
+- **Clipboard** — Ctrl+Shift+C to copy, Ctrl+Shift+V to paste
+- **PTY resize** — window resize propagates to the shell process
+- **Sarcastic commentary** — judgmental remarks on your command history
 
-- VT100, VT220, and xterm-compatible terminal behavior.
-- GPU rendering with `wgpu`.
-- PTY-backed shell sessions using portable Rust crates.
-- Tabs, splits, search, configurable themes, and low-latency input.
-- Command lifecycle monitoring through shell integration and fallbacks.
-- Commentary rendered in a translucent side gutter, never mixed into shell output.
-- Personality levels: Professional, Snarky, Unhinged, and British.
-- Roast Intensity slider from 0 to 100.
-- Local Ollama support for optional dynamic commentary.
-- WASM-based plugin system for custom personalities and achievements.
-- SQLite-backed statistics and session history.
+## Install
 
-## Repository Status
-
-SnarkTerm now has a usable first cut: a PTY-backed terminal binary named `snarkterm` that can launch your shell or run a command through your shell. The full GPU window, tabs, splits, side gutter, and renderer are still under active implementation.
-
-Current reality, because marketing is how software lies to itself:
-
-- Usable: PTY-backed shell launch in the current terminal.
-- Usable: `snarkterm -c <COMMAND>` command mode with commentary.
-- Usable: basic CLI help/version behavior.
-- Usable preview: native `winit`/`wgpu` window with live PTY output via `--window`.
-- Usable preview: basic keyboard input forwarding in the native window.
-- Usable preview: fixed terminal grid with basic CSI cursor movement, clear screen, clear line, and OSC skipping.
-- Usable preview: SGR foreground colors, including ANSI colors and 24-bit truecolor.
-- Usable preview: SGR background colors, bold/dim intensity, and window-size-based grid resizing.
-- Planned: full VT/xterm parser, scrollback, richer text attributes, and proper font shaping inside the native GPU window.
-- Planned: real snark gutter instead of command-mode stderr commentary.
-- Planned: shell integration, rules, stats, Ollama, plugins, tabs, and splits.
-
-## Install And Run
-
-Build the binary:
-
-```sh
-cargo build --release -p snarkterm-app --bin snarkterm
-```
-
-Run it from the repo:
-
-```sh
-cargo run -p snarkterm-app --bin snarkterm
-```
-
-Run a single command with commentary:
-
-```sh
-cargo run -p snarkterm-app --bin snarkterm -- -c 'printf hello'
-```
-
-Launch the native GPU window preview:
-
-```sh
-cargo run -p snarkterm-app --bin snarkterm -- --window
-```
-
-The native window currently uses a tiny built-in bitmap font and a shared terminal grid/parser from `snarkterm-core`. It can show basic shell prompts and command output, handle common cursor movement/clear sequences, skip OSC title sequences, render foreground/background colors, and resize its grid from the window dimensions. It is not yet a full terminal emulator. It is, however, no longer just a dark rectangle pondering its LinkedIn announcement.
-
-Install locally with Cargo:
-
-```sh
+```bash
 cargo install --path crates/snarkterm-app
 ```
 
-Then run:
+Or build from source:
 
-```sh
+```bash
+git clone https://github.com/ghostfrogcherry/snarkterm.git
+cd snarkterm
+cargo build --release
+```
+
+## Usage
+
+```bash
+# Launch the native GPU window
+snarkterm --window
+
+# Run a command with snarky commentary
+snarkterm -c "ls -la"
+snarkterm -c "git push --force"
+snarkterm -c "asdfghjkl"  # command not found
+
+# Launch a shell in your real terminal
 snarkterm
 ```
 
-If you want fewer comments from the rectangle with opinions:
+## Keyboard Shortcuts
 
-```sh
-snarkterm -c 'false' --no-commentary
+| Key | Action |
+|-----|--------|
+| Ctrl+C | Interrupt (SIGINT) |
+| Ctrl+D | End of file |
+| Ctrl+Z | Suspend (SIGTSTP) |
+| Ctrl+L | Clear screen |
+| Ctrl+Shift+C | Copy visible text to clipboard |
+| Ctrl+Shift+V | Paste from clipboard |
+| Page Up/Down | Scroll through history |
+| F1–F12 | Function keys |
+| Arrow keys | Cursor movement |
+| Home/End | Beginning/end of line |
+
+## Snark Examples
+
+```
+$ snarkterm -c "rm -rf /"
+SnarkTerm: I see we've arrived at the burn down the library to find the bookmark phase.
+
+$ snarkterm -c "git push --force origin main"
+SnarkTerm: Force push detected. Somewhere, a future coworker just developed a migraine.
+
+$ snarkterm -c "asdfghjkl"
+SnarkTerm: Command not found. Either it doesn't exist, or it's hiding from you.
+
+$ snarkterm -c "echo hello"
+SnarkTerm: Exit code 0. A rare and beautiful creature, like a printer that works.
 ```
 
-## Documentation
+## Architecture
 
-- `docs/DESIGN.md`: full technical design with architecture, rendering, PTY, rules, plugins, LLM, security, achievements, and milestone issues.
-- `docs/ARCHITECTURE.md`: system architecture, crate layout, rendering, PTY, and personality design.
-- `docs/PLUGIN_API.md`: planned plugin model and WASM sandbox contract.
-- `docs/SCHEMA.md`: planned SQLite schema.
-- `docs/ROADMAP.md`: implementation phases and release milestones.
-- `docs/PRIVACY.md`: privacy, local LLM, redaction, and safety expectations.
-- `man/snarkterm.1`: useful Unix man page with the appropriate amount of disappointment.
-- `tldr/snarkterm.md`: concise usage examples for users with builds still running.
-- `examples/shell/`: Bash, Zsh, and Fish OSC 777 shell integration examples.
-
-## Current Product State
-
-The Rust workspace defines the crate boundaries and shared event types that future implementation work will build on. The `snarkterm` binary is intentionally minimal, but it is no longer a decorative README. It opens a real PTY, spawns your shell, forwards bytes, restores raw mode on exit, and can launch a native GPU window with live shell output.
-
-Known limitations:
-
-- GPU window renders basic bitmap terminal text from a live PTY.
-- Native window has a fixed grid and basic CSI parser.
-- Terminal grid/parser lives in `snarkterm-core` instead of the app binary.
-- Foreground SGR colors render in the native GPU window.
-- Background SGR colors and bold/dim intensity render in the native GPU window.
-- Native grid resizes based on window dimensions.
-- No scrollback owned by SnarkTerm yet.
-- No tabs/splits yet.
-- No side gutter yet.
-- Native window parser is intentionally incomplete and ignores many escape sequences.
-- Interactive mode depends on the host terminal emulator for display.
-- Resize handling is still basic.
-- Commentary in command mode prints to stderr until the real UI gutter exists.
+```
+snarkterm-app          CLI, GPU window renderer, keyboard input
+snarkterm-core         Terminal grid, CSI/SGR parser, types
+snarkterm-pty          Shell integration markers, PTY abstractions
+snarkterm-personality  Canned commentary generation
+snarkterm-rules        Danger command detection
+snarkterm-plugins      Plugin manifest and permissions (WASM, upcoming)
+snarkterm-config       TOML configuration schema
+snarkterm-db           SQLite schema for stats/achievements
+snarkterm-llm          Ollama client for local LLM integration
+snarkterm-render       Render abstractions
+snarkterm-ui           UI component types
+snarkterm-testkit      Test utilities
+```
 
 ## License
 
-License selection is pending. Apache-2.0 or MIT are both reasonable choices for this project.
+MIT OR Apache-2.0

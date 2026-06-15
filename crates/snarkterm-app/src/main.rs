@@ -530,7 +530,40 @@ impl GpuWindowState {
         }
 
         let ctrl = self.modifiers.control_key();
+        let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
+
+        if ctrl && shift {
+            if let Key::Character(ch) = &key.logical_key {
+                match ch.as_str() {
+                    "c" | "C" => {
+                        if let Ok(terminal) = self.terminal.lock() {
+                            let text = terminal.visible_lines().join("\n");
+                            if !text.is_empty() {
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    let _ = clipboard.set_text(text);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    "v" | "V" => {
+                        let text = arboard::Clipboard::new()
+                            .ok()
+                            .and_then(|mut c| c.get_text().ok())
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            if let Ok(mut writer) = self.pty_writer.lock() {
+                                let _ = writer.write_all(text.as_bytes());
+                                let _ = writer.flush();
+                            }
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         let bytes: Option<&[u8]> = match &key.logical_key {
             Key::Named(NamedKey::Enter) => Some(b"\r"),
@@ -544,6 +577,18 @@ impl GpuWindowState {
             Key::Named(NamedKey::Home) => Some(b"\x1b[H"),
             Key::Named(NamedKey::End) => Some(b"\x1b[F"),
             Key::Named(NamedKey::Delete) => Some(b"\x1b[3~"),
+            Key::Named(NamedKey::F1) => Some(b"\x1bOP"),
+            Key::Named(NamedKey::F2) => Some(b"\x1bOQ"),
+            Key::Named(NamedKey::F3) => Some(b"\x1bOR"),
+            Key::Named(NamedKey::F4) => Some(b"\x1bOS"),
+            Key::Named(NamedKey::F5) => Some(b"\x1b[15~"),
+            Key::Named(NamedKey::F6) => Some(b"\x1b[17~"),
+            Key::Named(NamedKey::F7) => Some(b"\x1b[18~"),
+            Key::Named(NamedKey::F8) => Some(b"\x1b[19~"),
+            Key::Named(NamedKey::F9) => Some(b"\x1b[20~"),
+            Key::Named(NamedKey::F10) => Some(b"\x1b[21~"),
+            Key::Named(NamedKey::F11) => Some(b"\x1b[23~"),
+            Key::Named(NamedKey::F12) => Some(b"\x1b[24~"),
             Key::Named(NamedKey::PageUp) => {
                 if let Ok(mut terminal) = self.terminal.lock() {
                     terminal.scroll_page_up();
