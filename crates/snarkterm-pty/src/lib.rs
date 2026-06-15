@@ -24,3 +24,35 @@ pub fn parse_marker(payload: &str) -> Option<ShellMarker> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_marker, ShellMarker};
+
+    #[test]
+    fn parses_prompt_start_marker() {
+        let marker = parse_marker("snarkterm;event=prompt_start;cwd=/tmp");
+
+        assert_eq!(marker, Some(ShellMarker::PromptStart));
+    }
+
+    #[test]
+    fn ignores_non_snarkterm_marker() {
+        let marker = parse_marker("not-snarkterm;event=prompt_start");
+
+        assert_eq!(marker, None);
+    }
+
+    #[test]
+    fn parses_command_end_marker() {
+        let marker = parse_marker("snarkterm;event=command_end;status=1;duration_ms=842");
+
+        assert_eq!(
+            marker,
+            Some(ShellMarker::CommandEnd {
+                status: None,
+                duration_ms: None,
+            })
+        );
+    }
+}

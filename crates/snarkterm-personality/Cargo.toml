@@ -9,3 +9,6 @@ description = "Personality profiles and commentary generation for SnarkTerm."
 [dependencies]
 chrono.workspace = true
 snarkterm-core = { path = "../snarkterm-core" }
+
+[dev-dependencies]
+uuid.workspace = true

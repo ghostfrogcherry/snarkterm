@@ -8,3 +8,7 @@ description = "Command classification and safety rules for SnarkTerm."
 
 [dependencies]
 snarkterm-core = { path = "../snarkterm-core" }
+
+[dev-dependencies]
+chrono.workspace = true
+uuid.workspace = true

